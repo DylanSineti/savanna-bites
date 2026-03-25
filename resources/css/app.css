@@ -1,0 +1,11 @@
+@import 'tailwindcss';
+
+@source '../**/*.blade.php';
+@source '../**/*.jsx';
+@source '../**/*.js';
+@source '../../vendor/laravel/framework/src/Illuminate/Pagination/resources/views/*.blade.php';
+@source '../../storage/framework/views/*.php';
+
+@theme {
+    --font-sans: 'DM Sans', ui-sans-serif, system-ui, sans-serif;
+}

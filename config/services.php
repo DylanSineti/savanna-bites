@@ -35,4 +35,21 @@ return [
         ],
     ],
 
+    'paynow' => [
+        'integration_id'  => env('PAYNOW_INTEGRATION_ID'),
+        'integration_key' => env('PAYNOW_INTEGRATION_KEY'),
+        'auth_email'      => env('PAYNOW_AUTH_EMAIL'),
+        'test_phone'      => env('PAYNOW_TEST_PHONE'),
+        'result_url'      => env('PAYNOW_RESULT_URL'),
+        'return_url'      => env('PAYNOW_RETURN_URL'),
+        'mock'            => env('PAYNOW_MOCK', false),
+    ],
+
+    'whatsapp' => [
+        'token'        => env('WHATSAPP_TOKEN'),
+        'phone_id'     => env('WHATSAPP_PHONE_ID'),
+        'verify_token' => env('WHATSAPP_VERIFY_TOKEN'),
+        'admin_phone'  => env('ADMIN_WHATSAPP'),
+    ],
+
 ];

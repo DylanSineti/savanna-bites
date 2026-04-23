@@ -4,17 +4,25 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 
-class ConversationState extends Model
+/**
+ * @mixin \Illuminate\Database\Eloquent\Model
+ */
+class TeamMember extends Model
 {
     protected $fillable = [
+        'name',
         'phone',
-        'state',
-        'order_text',
-        'cart',
+        'role',
+        'is_active',
+        'note',
     ];
 
     public function restaurant()
     {
         return $this->belongsTo(Restaurant::class);
     }
+
+    protected $casts = [
+        'is_active' => 'boolean',
+    ];
 }

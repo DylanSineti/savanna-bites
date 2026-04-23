@@ -3,14 +3,47 @@
 namespace App\Http\Controllers;
 
 use App\Models\MenuItem;
+use App\Models\Restaurant;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 
 class MenuItemController extends Controller
 {
+    private function restaurant(): Restaurant
+    {
+        if (app()->bound('restaurant')) {
+            return app('restaurant');
+        }
+
+        return Restaurant::where('is_active', true)->firstOrFail();
+    }
+
     public function index()
     {
         $items = MenuItem::orderBy('sort_order')->orderBy('id')->get()->map(function ($item) {
+            return array_merge($item->toArray(), [
+                'image_url' => $item->image_path
+                    ? asset('storage/' . $item->image_path)
+                    : null,
+            ]);
+        });
+
+        return response()->json($items);
+    }
+
+    // Public endpoint — no auth required (uses phone_number_id query param to identify restaurant)
+    public function publicMenu(Request $request)
+    {
+        $phoneId    = $request->query('phone_id');
+        $restaurant = $phoneId
+            ? Restaurant::where('whatsapp_phone_id', $phoneId)->where('is_active', true)->first()
+            : null;
+
+        $query = MenuItem::where('available', true)
+            ->orderBy('sort_order')
+            ->orderBy('id');
+
+        $items = $query->get()->map(function ($item) {
             return array_merge($item->toArray(), [
                 'image_url' => $item->image_path
                     ? asset('storage/' . $item->image_path)

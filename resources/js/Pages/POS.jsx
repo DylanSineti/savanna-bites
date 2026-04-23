@@ -1,948 +1,1003 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import Sidebar from "../Components/Sidebar";
 import { useTheme } from "../Context/ThemeContext";
+import { useIsMobile } from "../hooks/useIsMobile";
 
-const PAYMENT_METHODS = ["Cash", "EcoCash", "Card", "ZiG"];
+/* ─────────────────────────────────────────────────────────────
+   FONT INJECTION
+───────────────────────────────────────────────────────────── */
+function injectFonts() {
+  if (document.getElementById("pos-fonts")) return;
+  const l = document.createElement("link");
+  l.id = "pos-fonts"; l.rel = "stylesheet";
+  l.href = "https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=JetBrains+Mono:wght@400;500;600&family=Manrope:wght@300;400;500;600&display=swap";
+  document.head.appendChild(l);
+}
 
-const DEMO_ITEMS = [
-    {
-        id: 1,
-        name: "Chicken & Chips",
-        category: "Mains",
-        price: 4.5,
-        available: true,
-        emoji: "🍗",
-    },
-    {
-        id: 2,
-        name: "Burger Combo",
-        category: "Mains",
-        price: 5.0,
-        available: true,
-        emoji: "🍔",
-    },
-    {
-        id: 3,
-        name: "Mazoe",
-        category: "Drinks",
-        price: 0.5,
-        available: true,
-        emoji: "🥤",
-    },
-    {
-        id: 4,
-        name: "Water",
-        category: "Drinks",
-        price: 0.3,
-        available: true,
-        emoji: "💧",
-    },
-];
+/* ─────────────────────────────────────────────────────────────
+   CONSTANTS
+───────────────────────────────────────────────────────────── */
+const STATUS_FLOW_DELIVERY = ["pending", "preparing", "ready", "out_for_delivery", "completed"];
+const STATUS_FLOW_PICKUP   = ["pending", "preparing", "ready", "completed"];
+const getFlow = (order) => order?.order_type === "pickup" ? STATUS_FLOW_PICKUP : STATUS_FLOW_DELIVERY;
 
-export default function POS() {
-    const { theme: t } = useTheme();
-    const [menuItems, setMenuItems] = useState(DEMO_ITEMS);
-    const [cart, setCart] = useState([]);
-    const [category, setCategory] = useState("All");
-    const [payMethod, setPayMethod] = useState("Cash");
-    const [amountGiven, setAmountGiven] = useState("");
-    const [note, setNote] = useState("");
-    const [placing, setPlacing] = useState(false);
-    const [receipt, setReceipt] = useState(null);
-    const [search, setSearch] = useState("");
+const STATUS = {
+  pending:          { label: "Pending",           short: "Pending",  color: "#f59e0b" },
+  pickup:           { label: "Pickup Order",       short: "Pickup",   color: "#f59e0b" },
+  delivery:         { label: "Delivery Order",     short: "Delivery", color: "#38bdf8" },
+  preparing:        { label: "Preparing",          short: "Prep",     color: "#3b82f6" },
+  ready:            { label: "Ready to Collect",   short: "Ready",    color: "#10b981" },
+  out_for_delivery: { label: "Out for Delivery",   short: "On Way",   color: "#a78bfa" },
+  completed:        { label: "Completed",          short: "Done",     color: "#6b7280" },
+};
 
-    useEffect(() => {
-        fetch("/api/menu-items", { headers: { Accept: "application/json" } })
-            .then((r) => (r.ok ? r.json() : []))
-            .then((data) => {
-                if (Array.isArray(data) && data.length) setMenuItems(data);
-            })
-            .catch(() => {});
-    }, []);
+const PAY = {
+  cash:    { label: "Cash",    color: "#f59e0b" },
+  ecocash: { label: "EcoCash", color: "#a78bfa" },
+};
 
-    const addToCart = (item) => {
-        setCart((prev) => {
-            const ex = prev.find((i) => i.id === item.id);
-            if (ex)
-                return prev.map((i) =>
-                    i.id === item.id ? { ...i, qty: i.qty + 1 } : i,
-                );
-            return [...prev, { ...item, qty: 1 }];
-        });
-    };
+const ECO = {
+  pending: { label: "Awaiting payment", color: "#f59e0b" },
+  manual:  { label: "Manual — verify",  color: "#38bdf8" },
+  paid:    { label: "Confirmed paid",   color: "#10b981" },
+  failed:  { label: "Failed",           color: "#ef4444" },
+};
 
-    const removeOne = (id) => {
-        setCart((prev) => {
-            const ex = prev.find((i) => i.id === id);
-            if (!ex) return prev;
-            if (ex.qty === 1) return prev.filter((i) => i.id !== id);
-            return prev.map((i) =>
-                i.id === id ? { ...i, qty: i.qty - 1 } : i,
-            );
-        });
-    };
+const PALETTE = ["#f59e0b","#3b82f6","#10b981","#a78bfa","#ef4444","#06b6d4","#f97316","#ec4899"];
 
-    const clearCart = () => {
-        setCart([]);
-        setAmountGiven("");
-        setNote("");
-    };
+/* ─────────────────────────────────────────────────────────────
+   CHROME HELPER
+───────────────────────────────────────────────────────────── */
+function chrome(t) {
+  const dark = t.isDark ?? (typeof t.bg === "string" && (t.bg.startsWith("#0") || t.bg === "#0a0a0a"));
+  return {
+    dark,
+    cardBg:   t.cardBg   ?? (dark ? "rgba(255,255,255,.025)" : "#fff"),
+    subBg:    t.subBg    ?? (dark ? "rgba(255,255,255,.04)"  : "#f5f5f3"),
+    inputBg:  t.inputBg  ?? (dark ? "rgba(255,255,255,.05)"  : "#fff"),
+    rowHover: t.rowHover ?? (dark ? "rgba(255,255,255,.04)"  : "rgba(0,0,0,.035)"),
+    border:   t.border   ?? (dark ? "rgba(255,255,255,.08)"  : "rgba(0,0,0,.09)"),
+    dimSep:               dark ? "rgba(255,255,255,.05)"  : "rgba(0,0,0,.06)",
+    text:     t.text     ?? (dark ? "rgba(255,255,255,.88)"  : "#111"),
+    muted:    t.muted    ?? (dark ? "rgba(255,255,255,.32)"  : "#888"),
+    faint:                dark ? "rgba(255,255,255,.1)"   : "rgba(0,0,0,.1)",
+    hlText:   t.hlText   ?? "#4ade80",
+    queueBg:              dark ? "rgba(0,0,0,.25)"        : "rgba(0,0,0,.03)",
+  };
+}
 
-    const subtotal = cart.reduce((s, i) => s + i.price * i.qty, 0);
-    const change = parseFloat(amountGiven || 0) - subtotal;
-    const cartCount = cart.reduce((s, i) => s + i.qty, 0);
+/* ─────────────────────────────────────────────────────────────
+   HELPERS
+───────────────────────────────────────────────────────────── */
+const csrf   = () => document.querySelector('meta[name="csrf-token"]')?.content ?? "";
+async function apiFetch(url, opts = {}) {
+  const r = await fetch(url, {
+    headers: { "Content-Type": "application/json", "X-CSRF-TOKEN": csrf(), Accept: "application/json", ...opts.headers },
+    ...opts,
+  });
+  if (!r.ok) throw new Error(String(r.status));
+  return r.json();
+}
+const nextSt  = (s, order) => {
+  if (s === "pickup" || s === "delivery") return "preparing";
+  const flow = getFlow(order); const i = flow.indexOf(s);
+  return i >= 0 && i < flow.length - 1 ? flow[i + 1] : null;
+};
+const money   = (n) => "$" + Number(n || 0).toFixed(2);
+const ac      = (s = "") => { let h = 0; for (let i = 0; i < s.length; i++) h = s.charCodeAt(i) + ((h << 5) - h); return PALETTE[Math.abs(h) % PALETTE.length]; };
+const initials = (s = "") => s.replace(/\D/g, "").slice(-4, -2) || s.replace(/\+/g, "").slice(0, 2).toUpperCase() || "?";
+function timeAgo(d) {
+  const s = Math.floor((Date.now() - new Date(d)) / 1000);
+  if (s < 60) return s + "s"; const m = Math.floor(s / 60);
+  if (m < 60) return m + "m"; return Math.floor(m / 60) + "h " + (m % 60) + "m";
+}
+const ageColor = (d) => { const m = Math.floor((Date.now() - new Date(d)) / 60000); return m < 10 ? "#10b981" : m < 25 ? "#f59e0b" : "#ef4444"; };
 
-    const categories = [
-        "All",
-        ...new Set(menuItems.map((i) => i.category).filter(Boolean)),
-    ];
-    const filtered = menuItems.filter((item) => {
-        const matchCat = category === "All" || item.category === category;
-        const matchSearch = item.name
-            .toLowerCase()
-            .includes(search.toLowerCase());
-        return matchCat && matchSearch && item.available !== false;
-    });
+/* ─────────────────────────────────────────────────────────────
+   ATOMS
+───────────────────────────────────────────────────────────── */
+function Avatar({ name, sz = 36 }) {
+  const col = ac(name);
+  return (
+    <div style={{
+      width: sz, height: sz, borderRadius: 4, flexShrink: 0,
+      background: col + "18", color: col,
+      border: "1.5px solid " + col + "40",
+      display: "flex", alignItems: "center", justifyContent: "center",
+      fontFamily: "JetBrains Mono,monospace", fontWeight: 700,
+      fontSize: sz * 0.32, userSelect: "none",
+    }}>
+      {initials(name)}
+    </div>
+  );
+}
 
-    const placeOrder = async () => {
-        if (!cart.length) return;
-        setPlacing(true);
-        const csrf = document.querySelector('meta[name="csrf-token"]')?.content;
-        const orderText = cart.map((i) => `${i.qty}x ${i.name}`).join(", ");
-        try {
-            const res = await fetch("/api/orders", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    "X-CSRF-TOKEN": csrf,
-                    Accept: "application/json",
-                },
-                body: JSON.stringify({
-                    phone: "POS",
-                    order_text: orderText,
-                    total: subtotal.toFixed(2),
-                    status: "pos",
-                    note,
-                    payment_method: payMethod,
-                }),
-            });
-            const order = await res.json();
-            setReceipt({
-                id: order.id ?? Math.floor(Math.random() * 9999),
-                items: [...cart],
-                subtotal,
-                payMethod,
-                amountGiven: parseFloat(amountGiven || subtotal),
-                change: Math.max(0, change),
-                note,
-                time: new Date().toLocaleTimeString([], {
-                    hour: "2-digit",
-                    minute: "2-digit",
-                }),
-            });
-        } catch {
-            setReceipt({
-                id: Math.floor(Math.random() * 9999),
-                items: [...cart],
-                subtotal,
-                payMethod,
-                amountGiven: parseFloat(amountGiven || subtotal),
-                change: Math.max(0, change),
-                note,
-                time: new Date().toLocaleTimeString([], {
-                    hour: "2-digit",
-                    minute: "2-digit",
-                }),
-            });
-        }
-        clearCart();
-        setPlacing(false);
-    };
+function Tick({ at }) {
+  const [, re] = useState(0);
+  useEffect(() => { const id = setInterval(() => re(n => n + 1), 20000); return () => clearInterval(id); }, []);
+  return (
+    <span style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 10, fontWeight: 600, color: ageColor(at), letterSpacing: "0.04em" }}>
+      {timeAgo(at)}
+    </span>
+  );
+}
 
-    const quickAmounts = [5, 10, 20, 50].filter((a) => a >= subtotal - 0.01);
+function StatusChip({ status }) {
+  const cfg = STATUS[status] ?? STATUS.pending;
+  return (
+    <span style={{
+      display: "inline-flex", alignItems: "center", gap: 5,
+      fontFamily: "JetBrains Mono,monospace", fontSize: 10,
+      letterSpacing: "0.09em", textTransform: "uppercase",
+      color: cfg.color, background: cfg.color + "18",
+      border: "1px solid " + cfg.color + "35",
+      padding: "3px 9px", borderRadius: 3, whiteSpace: "nowrap",
+    }}>
+      <span style={{ width: 5, height: 5, borderRadius: "50%", background: cfg.color, flexShrink: 0 }} />
+      {cfg.short}
+    </span>
+  );
+}
 
-    return (
-        <div
-            className="flex min-h-screen"
-            style={{
-                background: t.bg,
-                color: t.text,
-                fontFamily: "'DM Sans', sans-serif",
-                transition: "all .2s",
-            }}
-        >
-            <Sidebar />
+function SecHead({ children, c }) {
+  return (
+    <div style={{
+      fontFamily: "JetBrains Mono,monospace", fontSize: 9,
+      letterSpacing: "0.18em", textTransform: "uppercase",
+      color: c.muted, padding: "18px 24px 10px",
+      borderBottom: "1px solid " + c.dimSep, marginBottom: 2,
+    }}>{children}</div>
+  );
+}
 
-            <main
-                className="flex flex-1 overflow-hidden"
-                style={{ height: "100vh" }}
-            >
-                {/* ── LEFT: Menu Grid ── */}
-                <div
-                    className="flex flex-col flex-1 overflow-hidden"
-                    style={{ borderRight: `1px solid ${t.border}` }}
-                >
-                    {/* Header — identical spacing to other pages */}
-                    <div
-                        className="flex items-start justify-between p-8 pb-4 mb-0"
-                        style={{ borderBottom: `1px solid ${t.border}` }}
-                    >
-                        <div>
-                            <h1 className="text-xl font-medium tracking-tight">
-                                Point of Sale
-                            </h1>
-                            <p
-                                className="mt-1 text-sm"
-                                style={{ color: t.muted }}
-                            >
-                                Tap items to add to the current order
-                            </p>
-                        </div>
-                        <div className="flex items-center gap-3">
-                            <div
-                                className="flex items-center gap-2 px-3 py-1.5 rounded-full text-xs"
-                                style={{
-                                    background: t.cardBg,
-                                    border: `1px solid ${t.border}`,
-                                    color: t.muted,
-                                }}
-                            >
-                                <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                                {cartCount > 0
-                                    ? `${cartCount} in cart`
-                                    : "Ready"}
-                            </div>
-                            <input
-                                value={search}
-                                onChange={(e) => setSearch(e.target.value)}
-                                placeholder="Search items…"
-                                className="rounded-lg px-3 py-1.5 text-xs focus:outline-none w-44"
-                                style={{
-                                    background: t.cardBg,
-                                    border: `1px solid ${t.border}`,
-                                    color: t.text,
-                                }}
-                            />
-                        </div>
-                    </div>
-
-                    {/* Category tabs */}
-                    <div
-                        className="flex gap-2 px-8 py-3"
-                        style={{ borderBottom: `1px solid ${t.border}` }}
-                    >
-                        {categories.map((c) => (
-                            <button
-                                key={c}
-                                onClick={() => setCategory(c)}
-                                className="px-3 py-1 text-xs capitalize transition-all rounded-md"
-                                style={{
-                                    background:
-                                        category === c
-                                            ? t.navActive
-                                            : "transparent",
-                                    color: category === c ? t.text : t.muted,
-                                    border: `1px solid ${category === c ? (t.isDark ? "#333" : "#ccc") : t.border}`,
-                                }}
-                            >
-                                {c}
-                            </button>
-                        ))}
-                    </div>
-
-                    {/* Item grid */}
-                    <div className="flex-1 p-8 overflow-y-auto">
-                        {filtered.length === 0 ? (
-                            <div
-                                className="flex items-center justify-center h-40 text-sm"
-                                style={{ color: t.muted }}
-                            >
-                                No items found
-                            </div>
-                        ) : (
-                            <div
-                                className="grid gap-4"
-                                style={{
-                                    gridTemplateColumns:
-                                        "repeat(auto-fill, minmax(140px, 1fr))",
-                                }}
-                            >
-                                {filtered.map((item) => {
-                                    const inCart = cart.find(
-                                        (i) => i.id === item.id,
-                                    );
-                                    return (
-                                        <button
-                                            key={item.id}
-                                            onClick={() => addToCart(item)}
-                                            className="relative p-4 text-left transition-all rounded-xl active:scale-95"
-                                            style={{
-                                                background: inCart
-                                                    ? t.highlight
-                                                    : t.cardBg,
-                                                border: `1px solid ${inCart ? t.hlBorder : t.cardBorder}`,
-                                            }}
-                                        >
-                                            <div className="mb-2 text-3xl">
-                                                {item.emoji || "🍽️"}
-                                            </div>
-                                            <div
-                                                className="mb-1 text-xs font-medium leading-tight"
-                                                style={{ color: t.text }}
-                                            >
-                                                {item.name}
-                                            </div>
-                                            <div
-                                                className="text-[10px] tracking-widest uppercase"
-                                                style={{
-                                                    color: t.muted,
-                                                    fontFamily:
-                                                        "DM Mono, monospace",
-                                                }}
-                                            >
-                                                {item.category}
-                                            </div>
-                                            <div
-                                                className="mt-1 text-sm font-medium"
-                                                style={{
-                                                    color: t.hlText,
-                                                    fontFamily:
-                                                        "DM Mono, monospace",
-                                                }}
-                                            >
-                                                ${Number(item.price).toFixed(2)}
-                                            </div>
-                                            {inCart && (
-                                                <div
-                                                    className="absolute top-2 right-2 w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold"
-                                                    style={{
-                                                        background: t.hlText,
-                                                        color: "#0a0a0a",
-                                                    }}
-                                                >
-                                                    {inCart.qty}
-                                                </div>
-                                            )}
-                                        </button>
-                                    );
-                                })}
-                            </div>
-                        )}
-                    </div>
-                </div>
-
-                {/* ── RIGHT: Order Panel ── */}
-                <div
-                    className="flex flex-col shrink-0"
-                    style={{ width: "320px", background: t.cardBg }}
-                >
-                    {/* Header */}
-                    <div
-                        className="flex items-start justify-between p-8 pb-4"
-                        style={{ borderBottom: `1px solid ${t.border}` }}
-                    >
-                        <div>
-                            <h1 className="text-xl font-medium tracking-tight">
-                                Order
-                            </h1>
-                            <p
-                                className="mt-1 text-sm"
-                                style={{ color: t.muted }}
-                            >
-                                {cartCount > 0
-                                    ? `${cartCount} item${cartCount !== 1 ? "s" : ""} · $${subtotal.toFixed(2)}`
-                                    : "Empty"}
-                            </p>
-                        </div>
-                        {cart.length > 0 && (
-                            <button
-                                onClick={clearCart}
-                                className="px-3 py-1.5 rounded-lg text-xs transition-all"
-                                style={{
-                                    background: "transparent",
-                                    border: `1px solid ${t.border}`,
-                                    color: t.muted,
-                                }}
-                                onMouseEnter={(e) => {
-                                    e.currentTarget.style.color = "#f87171";
-                                    e.currentTarget.style.borderColor =
-                                        "#7f1d1d";
-                                }}
-                                onMouseLeave={(e) => {
-                                    e.currentTarget.style.color = t.muted;
-                                    e.currentTarget.style.borderColor =
-                                        t.border;
-                                }}
-                            >
-                                Clear
-                            </button>
-                        )}
-                    </div>
-
-                    {/* Spacer to align with category tabs */}
-                    <div
-                        style={{
-                            height: "41px",
-                            borderBottom: `1px solid ${t.border}`,
-                        }}
-                    />
-
-                    {/* Cart items */}
-                    <div className="flex-1 p-4 overflow-y-auto">
-                        {cart.length === 0 ? (
-                            <div
-                                className="flex flex-col items-center justify-center h-full gap-2"
-                                style={{ color: t.muted }}
-                            >
-                                <div className="text-4xl opacity-20">🛒</div>
-                                <div className="text-sm">Tap items to add</div>
-                            </div>
-                        ) : (
-                            <div className="space-y-2">
-                                {cart.map((item) => (
-                                    <div
-                                        key={item.id}
-                                        className="flex items-center gap-2 px-3 py-2.5 rounded-xl"
-                                        style={{ background: t.subBg }}
-                                    >
-                                        <div className="text-xl">
-                                            {item.emoji || "🍽️"}
-                                        </div>
-                                        <div className="flex-1 min-w-0">
-                                            <div
-                                                className="text-xs font-medium truncate"
-                                                style={{ color: t.text }}
-                                            >
-                                                {item.name}
-                                            </div>
-                                            <div
-                                                className="text-[10px] mt-0.5"
-                                                style={{
-                                                    color: t.muted,
-                                                    fontFamily:
-                                                        "DM Mono, monospace",
-                                                }}
-                                            >
-                                                ${Number(item.price).toFixed(2)}{" "}
-                                                × {item.qty}
-                                            </div>
-                                        </div>
-                                        <div
-                                            className="text-xs font-medium"
-                                            style={{
-                                                color: t.hlText,
-                                                fontFamily:
-                                                    "DM Mono, monospace",
-                                            }}
-                                        >
-                                            $
-                                            {(item.price * item.qty).toFixed(2)}
-                                        </div>
-                                        <div className="flex items-center gap-1">
-                                            <button
-                                                onClick={() =>
-                                                    removeOne(item.id)
-                                                }
-                                                className="flex items-center justify-center w-5 h-5 text-xs rounded"
-                                                style={{
-                                                    background: t.border,
-                                                    color: t.muted,
-                                                }}
-                                            >
-                                                −
-                                            </button>
-                                            <button
-                                                onClick={() => addToCart(item)}
-                                                className="flex items-center justify-center w-5 h-5 text-xs rounded"
-                                                style={{
-                                                    background: t.hlText,
-                                                    color: "#0a0a0a",
-                                                }}
-                                            >
-                                                +
-                                            </button>
-                                        </div>
-                                    </div>
-                                ))}
-                            </div>
-                        )}
-                    </div>
-
-                    {/* Footer */}
-                    {cart.length > 0 && (
-                        <div
-                            className="p-4 space-y-3"
-                            style={{ borderTop: `1px solid ${t.border}` }}
-                        >
-                            <div className="flex items-center justify-between px-1">
-                                <span
-                                    className="text-sm"
-                                    style={{ color: t.muted }}
-                                >
-                                    Subtotal
-                                </span>
-                                <span
-                                    className="text-2xl font-medium tracking-tight"
-                                    style={{
-                                        color: t.hlText,
-                                        fontFamily: "DM Mono, monospace",
-                                    }}
-                                >
-                                    ${subtotal.toFixed(2)}
-                                </span>
-                            </div>
-
-                            <input
-                                value={note}
-                                onChange={(e) => setNote(e.target.value)}
-                                placeholder="Order note (optional)…"
-                                className="w-full px-3 py-2 text-xs rounded-lg focus:outline-none"
-                                style={{
-                                    background: t.inputBg,
-                                    border: `1px solid ${t.border}`,
-                                    color: t.text,
-                                }}
-                            />
-
-                            <div>
-                                <div
-                                    className="text-[10px] tracking-widest uppercase mb-2"
-                                    style={{
-                                        color: t.muted,
-                                        fontFamily: "DM Mono, monospace",
-                                    }}
-                                >
-                                    Payment
-                                </div>
-                                <div className="grid grid-cols-2 gap-1.5">
-                                    {PAYMENT_METHODS.map((m) => (
-                                        <button
-                                            key={m}
-                                            onClick={() => setPayMethod(m)}
-                                            className="py-1.5 rounded-lg text-xs font-medium transition-all"
-                                            style={{
-                                                background:
-                                                    payMethod === m
-                                                        ? t.hlText
-                                                        : t.subBg,
-                                                color:
-                                                    payMethod === m
-                                                        ? "#0a0a0a"
-                                                        : t.muted,
-                                                border: `1px solid ${payMethod === m ? t.hlText : t.border}`,
-                                            }}
-                                        >
-                                            {m}
-                                        </button>
-                                    ))}
-                                </div>
-                            </div>
-
-                            {payMethod === "Cash" && (
-                                <div>
-                                    <div
-                                        className="text-[10px] tracking-widest uppercase mb-2"
-                                        style={{
-                                            color: t.muted,
-                                            fontFamily: "DM Mono, monospace",
-                                        }}
-                                    >
-                                        Amount Given
-                                    </div>
-                                    <input
-                                        value={amountGiven}
-                                        onChange={(e) =>
-                                            setAmountGiven(e.target.value)
-                                        }
-                                        placeholder={`$${subtotal.toFixed(2)}`}
-                                        type="number"
-                                        step="0.01"
-                                        className="w-full px-3 py-2 mb-2 text-sm rounded-lg focus:outline-none"
-                                        style={{
-                                            background: t.inputBg,
-                                            border: `1px solid ${t.border}`,
-                                            color: t.text,
-                                            fontFamily: "DM Mono, monospace",
-                                        }}
-                                    />
-                                    <div className="flex gap-1.5 flex-wrap">
-                                        {quickAmounts.map((a) => (
-                                            <button
-                                                key={a}
-                                                onClick={() =>
-                                                    setAmountGiven(String(a))
-                                                }
-                                                className="px-2 py-1 text-xs transition-all rounded-lg"
-                                                style={{
-                                                    background: t.subBg,
-                                                    color: t.muted,
-                                                    border: `1px solid ${t.border}`,
-                                                }}
-                                            >
-                                                ${a}
-                                            </button>
-                                        ))}
-                                        <button
-                                            onClick={() =>
-                                                setAmountGiven(
-                                                    subtotal.toFixed(2),
-                                                )
-                                            }
-                                            className="px-2 py-1 text-xs transition-all rounded-lg"
-                                            style={{
-                                                background: t.subBg,
-                                                color: t.muted,
-                                                border: `1px solid ${t.border}`,
-                                            }}
-                                        >
-                                            Exact
-                                        </button>
-                                    </div>
-                                    {amountGiven && change >= 0 && (
-                                        <div
-                                            className="flex justify-between px-3 py-2 mt-2 rounded-lg"
-                                            style={{
-                                                background: t.highlight,
-                                                border: `1px solid ${t.hlBorder}`,
-                                            }}
-                                        >
-                                            <span
-                                                className="text-xs"
-                                                style={{ color: t.hlText }}
-                                            >
-                                                Change
-                                            </span>
-                                            <span
-                                                className="text-sm font-medium"
-                                                style={{
-                                                    color: t.hlText,
-                                                    fontFamily:
-                                                        "DM Mono, monospace",
-                                                }}
-                                            >
-                                                ${change.toFixed(2)}
-                                            </span>
-                                        </div>
-                                    )}
-                                </div>
-                            )}
-
-                            <button
-                                onClick={placeOrder}
-                                disabled={placing}
-                                className="w-full py-3 text-sm font-semibold transition-all rounded-xl disabled:opacity-50"
-                                style={{
-                                    background: t.hlText,
-                                    color: "#0a0a0a",
-                                }}
-                            >
-                                {placing
-                                    ? "Placing Order…"
-                                    : `Place Order · $${subtotal.toFixed(2)}`}
-                            </button>
-                        </div>
-                    )}
-                </div>
-            </main>
-
-            {/* Receipt Modal */}
-            {receipt && (
-                <div
-                    className="fixed inset-0 z-50 flex items-center justify-center"
-                    style={{
-                        background: "rgba(0,0,0,0.7)",
-                        backdropFilter: "blur(4px)",
-                    }}
-                >
-                    <div
-                        style={{
-                            background: t.cardBg,
-                            borderRadius: "20px",
-                            border: `1px solid ${t.border}`,
-                            width: "300px",
-                            overflow: "hidden",
-                        }}
-                    >
-                        {/* Header */}
-                        <div
-                            style={{
-                                background: "#0a0a0a",
-                                padding: "20px 20px 16px",
-                                textAlign: "center",
-                            }}
-                        >
-                            <div
-                                style={{
-                                    width: "36px",
-                                    height: "36px",
-                                    borderRadius: "8px",
-                                    background: t.hlText,
-                                    display: "flex",
-                                    alignItems: "center",
-                                    justifyContent: "center",
-                                    fontWeight: 700,
-                                    fontSize: "11px",
-                                    color: "#0a0a0a",
-                                    margin: "0 auto 10px",
-                                    letterSpacing: "-0.3px",
-                                }}
-                            >
-                                SB
-                            </div>
-                            <div
-                                style={{
-                                    color: "#f0ede6",
-                                    fontSize: "14px",
-                                    fontWeight: 500,
-                                }}
-                            >
-                                Savanna Bites Express
-                            </div>
-                            <div
-                                style={{
-                                    color: "#555",
-                                    fontSize: "11px",
-                                    marginTop: "3px",
-                                    fontFamily: "DM Mono, monospace",
-                                }}
-                            >
-                                Order #{String(receipt.id).padStart(4, "0")} ·{" "}
-                                {receipt.time}
-                            </div>
-                        </div>
-
-                        {/* Dashed divider */}
-                        <div
-                            style={{
-                                borderTop: `1.5px dashed ${t.border}`,
-                                margin: "0 16px",
-                            }}
-                        />
-
-                        {/* Items */}
-                        <div style={{ padding: "14px 20px 10px" }}>
-                            <div
-                                style={{
-                                    fontSize: "10px",
-                                    letterSpacing: "1.5px",
-                                    textTransform: "uppercase",
-                                    color: t.muted,
-                                    fontFamily: "DM Mono, monospace",
-                                    marginBottom: "10px",
-                                }}
-                            >
-                                Items
-                            </div>
-                            {receipt.items.map((item) => (
-                                <div
-                                    key={item.id}
-                                    style={{
-                                        display: "flex",
-                                        justifyContent: "space-between",
-                                        alignItems: "baseline",
-                                        marginBottom: "8px",
-                                    }}
-                                >
-                                    <div>
-                                        <span
-                                            style={{
-                                                fontSize: "13px",
-                                                color: t.text,
-                                            }}
-                                        >
-                                            {item.qty}× {item.name}
-                                        </span>
-                                        <span
-                                            style={{
-                                                fontSize: "11px",
-                                                marginLeft: "6px",
-                                            }}
-                                        >
-                                            {item.emoji}
-                                        </span>
-                                    </div>
-                                    <span
-                                        style={{
-                                            fontSize: "13px",
-                                            fontFamily: "DM Mono, monospace",
-                                            color: t.text,
-                                        }}
-                                    >
-                                        ${(item.price * item.qty).toFixed(2)}
-                                    </span>
-                                </div>
-                            ))}
-                        </div>
-
-                        {/* Dashed divider */}
-                        <div
-                            style={{
-                                borderTop: `1.5px dashed ${t.border}`,
-                                margin: "0 16px",
-                            }}
-                        />
-
-                        {/* Totals */}
-                        <div style={{ padding: "12px 20px" }}>
-                            {[
-                                ["Subtotal", `$${receipt.subtotal.toFixed(2)}`],
-                                ["Payment", receipt.payMethod],
-                                ...(receipt.payMethod === "Cash"
-                                    ? [
-                                          [
-                                              "Given",
-                                              `$${receipt.amountGiven.toFixed(2)}`,
-                                          ],
-                                      ]
-                                    : []),
-                                ...(receipt.note
-                                    ? [["Note", receipt.note]]
-                                    : []),
-                            ].map(([label, value]) => (
-                                <div
-                                    key={label}
-                                    style={{
-                                        display: "flex",
-                                        justifyContent: "space-between",
-                                        marginBottom: "6px",
-                                    }}
-                                >
-                                    <span
-                                        style={{
-                                            fontSize: "12px",
-                                            color: t.muted,
-                                        }}
-                                    >
-                                        {label}
-                                    </span>
-                                    <span
-                                        style={{
-                                            fontSize: "12px",
-                                            color: t.muted,
-                                            fontFamily: "DM Mono, monospace",
-                                        }}
-                                    >
-                                        {value}
-                                    </span>
-                                </div>
-                            ))}
-                        </div>
-
-                        {/* Change highlight */}
-                        {receipt.payMethod === "Cash" && (
-                            <div
-                                style={{
-                                    margin: "0 16px 16px",
-                                    background: t.highlight,
-                                    border: `1px solid ${t.hlBorder}`,
-                                    borderRadius: "10px",
-                                    padding: "12px 16px",
-                                    display: "flex",
-                                    justifyContent: "space-between",
-                                    alignItems: "center",
-                                }}
-                            >
-                                <span
-                                    style={{
-                                        fontSize: "12px",
-                                        color: t.hlText,
-                                        letterSpacing: "1px",
-                                        textTransform: "uppercase",
-                                        fontFamily: "DM Mono, monospace",
-                                    }}
-                                >
-                                    Change
-                                </span>
-                                <span
-                                    style={{
-                                        fontSize: "22px",
-                                        fontWeight: 500,
-                                        fontFamily: "DM Mono, monospace",
-                                        color: t.hlText,
-                                    }}
-                                >
-                                    ${receipt.change.toFixed(2)}
-                                </span>
-                            </div>
-                        )}
-
-                        {/* Dashed divider */}
-                        <div
-                            style={{
-                                borderTop: `1.5px dashed ${t.border}`,
-                                margin: "0 16px",
-                            }}
-                        />
-
-                        {/* Footer */}
-                        <div
-                            style={{
-                                padding: "14px 20px",
-                                textAlign: "center",
-                            }}
-                        >
-                            <div
-                                style={{
-                                    fontSize: "12px",
-                                    color: t.muted,
-                                    marginBottom: "4px",
-                                }}
-                            >
-                                Thank you for your order!
-                            </div>
-                            <div
-                                style={{
-                                    fontSize: "11px",
-                                    color: t.muted,
-                                    opacity: 0.6,
-                                }}
-                            >
-                                +263 77 247 6989 · savannabites.co.zw
-                            </div>
-                        </div>
-
-                        {/* Buttons */}
-                        <div
-                            style={{
-                                display: "flex",
-                                gap: "8px",
-                                padding: "0 16px 16px",
-                            }}
-                        >
-                            <button
-                                onClick={() => setReceipt(null)}
-                                style={{
-                                    flex: 1,
-                                    padding: "10px",
-                                    borderRadius: "10px",
-                                    background: t.hlText,
-                                    color: "#0a0a0a",
-                                    fontSize: "13px",
-                                    fontWeight: 500,
-                                    border: "none",
-                                    cursor: "pointer",
-                                }}
-                            >
-                                New Order
-                            </button>
-                            <button
-                                onClick={() => window.print()}
-                                style={{
-                                    padding: "10px 14px",
-                                    borderRadius: "10px",
-                                    background: "transparent",
-                                    color: t.muted,
-                                    fontSize: "13px",
-                                    border: `1px solid ${t.border}`,
-                                    cursor: "pointer",
-                                }}
-                            >
-                                🖨️
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            )}
+function Skeleton({ c }) {
+  return (
+    <div>
+      {Array.from({ length: 5 }).map((_, i) => (
+        <div key={i} style={{ display: "flex", gap: 12, padding: "16px 20px", borderBottom: "1px solid " + c.border, alignItems: "center" }}>
+          <div style={{ width: 36, height: 36, borderRadius: 4, background: c.subBg, flexShrink: 0 }} />
+          <div style={{ flex: 1 }}>
+            <div style={{ height: 10, width: "45%", borderRadius: 3, background: c.subBg, marginBottom: 8 }} />
+            <div style={{ height: 8, width: "70%", borderRadius: 3, background: c.subBg }} />
+          </div>
+          <div style={{ height: 20, width: 48, borderRadius: 3, background: c.subBg }} />
         </div>
+      ))}
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────
+   ORDER CARD
+───────────────────────────────────────────────────────────── */
+function OrderCard({ order, selected, onClick, c }) {
+  const sc  = STATUS[order.status] ?? STATUS.pending;
+  const tot = parseFloat(order.total) || 0;
+  const paid = order.payment_status === "paid";
+  const txt = (order.order_text ?? "").replace(/\n+/g, " · ").trim();
+  const [hover, setHover] = useState(false);
+
+  return (
+    <div
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        padding: "14px 18px 13px 20px",
+        borderBottom: "1px solid " + c.dimSep,
+        background: selected
+          ? (c.dark ? sc.color + "14" : sc.color + "09")
+          : hover ? c.rowHover : "transparent",
+        cursor: "pointer",
+        transition: "background .12s",
+        borderLeft: "3px solid " + (selected ? sc.color : "transparent"),
+        animation: "posIn .25s ease both",
+      }}
+    >
+      <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+        <Avatar name={order.phone} sz={36} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+
+          {/* row 1 */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8, marginBottom: 5 }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 12, fontWeight: 600, color: c.text, letterSpacing: "0.02em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                +{order.phone}
+              </div>
+              <div style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 10, color: c.muted, marginTop: 2, letterSpacing: "0.04em" }}>
+                #{String(order.id).padStart(4, "0")}
+              </div>
+            </div>
+            <div style={{ textAlign: "right", flexShrink: 0 }}>
+              <div style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 16, fontWeight: 700, color: c.hlText, letterSpacing: "-0.02em", lineHeight: 1.2 }}>
+                {money(tot)}
+              </div>
+              <div style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 10, fontWeight: 600, marginTop: 2, color: paid ? "#10b981" : "#f87171" }}>
+                {paid ? "✓ paid" : "unpaid"}
+              </div>
+            </div>
+          </div>
+
+          {/* items */}
+          <p style={{ margin: "0 0 8px", fontFamily: "Manrope,sans-serif", fontSize: 12, color: c.muted, lineHeight: 1.35, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {txt || "—"}
+          </p>
+
+          {/* chips row */}
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <StatusChip status={order.status} />
+            <span style={{ fontFamily: "Manrope,sans-serif", fontSize: 11, color: c.muted }}>
+              {PAY[order.payment_method]?.label ?? "EcoCash"}
+            </span>
+            {order.payment_method === "cash" && (parseFloat(order.amount_paid) || 0) > 0 && order.payment_status !== "paid" && (
+              <>
+                <span style={{ color: c.faint, fontSize: 10 }}>·</span>
+                <span style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 10, color: "#38bdf8" }}>
+                  {money(order.amount_paid)}
+                </span>
+              </>
+            )}
+            <span style={{ marginLeft: "auto" }}>
+              <Tick at={order.created_at} />
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────
+   FILTER BAR
+───────────────────────────────────────────────────────────── */
+function FilterBar({ orders, filter, setFilter, c }) {
+  const tabs = [
+    { k: "all",              l: "All" },
+    { k: "pending",          l: "Pending" },
+    { k: "pickup",           l: "Pickup" },
+    { k: "delivery",         l: "Delivery" },
+    { k: "preparing",        l: "Prep" },
+    { k: "ready",            l: "Ready" },
+    { k: "out_for_delivery", l: "On Way" },
+  ];
+  return (
+    <div style={{ display: "flex", gap: 2, padding: "8px 12px", borderBottom: "1px solid " + c.border, overflowX: "auto", flexShrink: 0 }}>
+      {tabs.map(tab => {
+        const count = tab.k === "all" ? orders.length : orders.filter(o => o.status === tab.k).length;
+        const on  = filter === tab.k;
+        const col = tab.k === "all" ? c.text : (STATUS[tab.k]?.color ?? c.muted);
+        return (
+          <button key={tab.k} onClick={() => setFilter(tab.k)} style={{
+            flexShrink: 0, display: "inline-flex", alignItems: "center", gap: 5,
+            padding: "5px 10px", borderRadius: 3, border: "none",
+            background: on ? col + "18" : "transparent",
+            color: on ? col : c.muted,
+            fontFamily: "JetBrains Mono,monospace", fontSize: 10,
+            letterSpacing: "0.08em", textTransform: "uppercase",
+            fontWeight: on ? 700 : 400, cursor: "pointer", transition: "all .1s",
+            borderBottom: on ? "2px solid " + col : "2px solid transparent",
+            marginBottom: -1,
+          }}>
+            {tab.l}
+            <span style={{
+              fontFamily: "JetBrains Mono,monospace", fontSize: 9,
+              padding: "1px 5px", borderRadius: 2,
+              background: on ? col + "25" : c.faint,
+              color: on ? col : c.muted,
+            }}>{count}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────
+   STATUS BLOCK — timeline + advance CTA
+───────────────────────────────────────────────────────────── */
+function StatusBlock({ order, onAdvance, saving, c }) {
+  const flow = getFlow(order);
+  const idx  = flow.indexOf(order.status);
+  const next = nextSt(order.status, order);
+  const nCfg = next ? STATUS[next] : null;
+  const pct  = flow.length > 1 ? (idx / (flow.length - 1)) * 100 : 100;
+
+  return (
+    <div style={{ padding: "0 24px 24px" }}>
+
+      {/* progress track */}
+      <div style={{ position: "relative", marginBottom: 24, paddingTop: 4 }}>
+        {/* track */}
+        <div style={{ position: "absolute", top: 11, left: 14, right: 14, height: 2, background: c.border, zIndex: 0 }} />
+        {/* fill */}
+        <div style={{
+          position: "absolute", top: 11, left: 14, height: 2, zIndex: 1,
+          width: "calc(" + pct + "% - 0px)",
+          background: STATUS[order.status]?.color ?? "#888",
+          transition: "width .4s cubic-bezier(.23,1,.32,1)",
+        }} />
+
+        {/* dots */}
+        <div style={{ display: "flex", justifyContent: "space-between", position: "relative", zIndex: 2 }}>
+          {flow.map((s, i) => {
+            const done = i <= idx;
+            const cur  = i === idx;
+            const cfg  = STATUS[s];
+            return (
+              <div key={s} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
+                <div style={{
+                  width: 24, height: 24, borderRadius: "50%",
+                  background: done ? cfg.color : c.subBg,
+                  border: "2px solid " + (done ? cfg.color : c.border),
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  fontSize: 9, fontFamily: "JetBrains Mono,monospace", fontWeight: 700,
+                  color: done ? "#fff" : c.muted,
+                  boxShadow: cur ? "0 0 0 5px " + cfg.color + "25" : "none",
+                  transition: "all .25s",
+                }}>
+                  {done ? "✓" : i + 1}
+                </div>
+                <span style={{
+                  fontFamily: "JetBrains Mono,monospace", fontSize: 9,
+                  letterSpacing: "0.06em", textTransform: "uppercase",
+                  fontWeight: cur ? 700 : 400,
+                  color: done ? cfg.color : c.muted,
+                  whiteSpace: "nowrap",
+                }}>{cfg.short}</span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* CTA */}
+      {next ? (
+        <button onClick={onAdvance} disabled={saving} style={{
+          width: "100%", padding: "14px",
+          borderRadius: 5, border: "none",
+          background: nCfg.color,
+          color: "#fff",
+          fontFamily: "JetBrains Mono,monospace", fontSize: 12,
+          letterSpacing: "0.1em", textTransform: "uppercase",
+          fontWeight: 700, cursor: saving ? "not-allowed" : "pointer",
+          opacity: saving ? 0.6 : 1,
+          boxShadow: "0 4px 20px " + nCfg.color + "40",
+          transition: "opacity .15s, box-shadow .15s",
+        }}>
+          {saving ? "Updating…" : "→ Mark as " + nCfg.label}
+        </button>
+      ) : (
+        <div style={{
+          textAlign: "center", padding: "13px 0",
+          borderRadius: 5, background: "rgba(74,222,128,.08)",
+          border: "1px solid rgba(74,222,128,.25)",
+          fontFamily: "JetBrains Mono,monospace", fontSize: 11,
+          letterSpacing: "0.1em", textTransform: "uppercase",
+          color: "#4ade80",
+        }}>
+          ✓ Order Completed
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────
+   PAY BLOCK
+───────────────────────────────────────────────────────────── */
+function PayBlock({ order, c, amt, setAmt, saving, marking, onSave, onCashFull, onEcoPaid }) {
+  const tot      = parseFloat(order.total) || 0;
+  const paid     = parseFloat(order.amount_paid) || 0;
+  const full     = order.payment_status === "paid";
+  const stated   = !full && paid > 0; // amount pre-declared by customer on WhatsApp
+  const stChange = stated ? Math.max(0, paid - tot) : 0;
+  const pct      = full ? 100 : 0;
+  const ent      = parseFloat(amt);
+  const chg      = !isNaN(ent) && ent > tot ? ent - tot : 0;
+
+  if (order.payment_method === "cash") {
+    return (
+      <div style={{ padding: "0 24px 4px" }}>
+        {/* totals row */}
+        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
+          <div>
+            <div style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 9, letterSpacing: "0.14em", textTransform: "uppercase", color: c.muted, marginBottom: 4 }}>Order Total</div>
+            <div style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 20, fontWeight: 700, color: c.text, letterSpacing: "-0.02em" }}>{money(tot)}</div>
+          </div>
+          <div style={{ textAlign: "right" }}>
+            <div style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 9, letterSpacing: "0.14em", textTransform: "uppercase", color: c.muted, marginBottom: 4 }}>
+              {full ? "Received" : stated ? "Cust. Stated" : "Collected"}
+            </div>
+            <div style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 20, fontWeight: 700, color: full ? "#10b981" : stated ? "#38bdf8" : "#f59e0b", letterSpacing: "-0.02em" }}>
+              {paid > 0 ? money(paid) : "—"}
+            </div>
+          </div>
+        </div>
+
+        {/* progress bar */}
+        <div style={{ height: 4, borderRadius: 99, background: c.border, overflow: "hidden", marginBottom: 16 }}>
+          <div style={{
+            height: "100%", width: pct + "%", borderRadius: 99,
+            background: full ? "#10b981" : "#f59e0b",
+            transition: "width .4s",
+          }} />
+        </div>
+
+        {full ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "13px 16px", borderRadius: 5, background: "rgba(74,222,128,.08)", border: "1px solid rgba(74,222,128,.25)" }}>
+            <span style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 12, color: "#4ade80", letterSpacing: "0.1em" }}>✓ FULLY PAID</span>
+          </div>
+        ) : stated ? (
+          /* ── Customer pre-stated amount via WhatsApp ── */
+          <>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 16px", borderRadius: 4, background: "rgba(56,189,248,.07)", border: "1px solid rgba(56,189,248,.25)", marginBottom: 12, borderLeft: "3px solid #38bdf8" }}>
+              <div>
+                <div style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 9, letterSpacing: "0.14em", textTransform: "uppercase", color: "#38bdf8", marginBottom: 4 }}>📱 Customer Will Pay</div>
+                <div style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 24, fontWeight: 700, color: "#38bdf8", letterSpacing: "-0.03em" }}>{money(paid)}</div>
+              </div>
+              {stChange > 0 && (
+                <div style={{ textAlign: "right" }}>
+                  <div style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 9, letterSpacing: "0.14em", textTransform: "uppercase", color: "#fbbf24", marginBottom: 4 }}>Give Change</div>
+                  <div style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 24, fontWeight: 700, color: "#fbbf24", letterSpacing: "-0.03em" }}>{money(stChange)}</div>
+                </div>
+              )}
+            </div>
+            <button onClick={onCashFull} disabled={marking} style={{
+              width: "100%", padding: "14px",
+              borderRadius: 5, border: "none",
+              background: "#10b981", color: "#fff",
+              fontFamily: "JetBrains Mono,monospace", fontSize: 12,
+              letterSpacing: "0.1em", textTransform: "uppercase",
+              fontWeight: 700, cursor: marking ? "not-allowed" : "pointer",
+              opacity: marking ? 0.6 : 1, boxShadow: "0 4px 20px rgba(16,185,129,.35)",
+            }}>
+              {marking ? "Confirming…" : "✓ Cash Collected — Mark as Paid"}
+            </button>
+          </>
+        ) : (
+          /* ── No pre-stated amount — staff enters cash received ── */
+          <>
+            {/* label */}
+            <div style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 9, letterSpacing: "0.16em", textTransform: "uppercase", color: c.muted, marginBottom: 8 }}>
+              Cash Received
+            </div>
+
+            {/* amount input */}
+            <div style={{ position: "relative", marginBottom: 8 }}>
+              <span style={{ position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)", fontFamily: "JetBrains Mono,monospace", fontSize: 15, color: c.muted, pointerEvents: "none" }}>$</span>
+              <input
+                type="number" step="0.01" min="0"
+                value={amt} onChange={e => setAmt(e.target.value)} placeholder="0.00"
+                style={{
+                  width: "100%", boxSizing: "border-box",
+                  padding: "12px 12px 12px 28px",
+                  borderRadius: 4, border: "1.5px solid " + c.border,
+                  background: c.inputBg, color: c.text,
+                  fontFamily: "JetBrains Mono,monospace", fontSize: 18, fontWeight: 600,
+                  outline: "none", letterSpacing: "-0.01em",
+                }}
+                onFocus={e => e.target.style.borderColor = "rgba(16,185,129,.5)"}
+                onBlur={e => e.target.style.borderColor = c.border}
+              />
+            </div>
+
+            {/* quick chips */}
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+              <button onClick={() => setAmt(tot.toFixed(2))} style={{ padding: "5px 11px", borderRadius: 3, background: c.subBg, border: "1px solid " + c.border, color: c.muted, fontFamily: "JetBrains Mono,monospace", fontSize: 10, cursor: "pointer" }}>
+                Exact {money(tot)}
+              </button>
+              {[5,10,20,50].filter(d => d > tot).slice(0,3).map(d => (
+                <button key={d} onClick={() => setAmt(String(d))} style={{ padding: "5px 11px", borderRadius: 3, background: c.subBg, border: "1px solid " + c.border, color: c.muted, fontFamily: "JetBrains Mono,monospace", fontSize: 10, cursor: "pointer" }}>
+                  ${d}
+                </button>
+              ))}
+            </div>
+
+            {/* change / owed feedback */}
+            {chg > 0 && (
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", borderRadius: 4, background: "rgba(251,191,36,.08)", border: "1px solid rgba(251,191,36,.25)", marginBottom: 10, borderLeft: "3px solid #fbbf24" }}>
+                <span style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 10, color: "#fbbf24", letterSpacing: "0.08em", textTransform: "uppercase" }}>Give Change</span>
+                <span style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 18, fontWeight: 700, color: "#fbbf24", letterSpacing: "-0.02em" }}>{money(chg)}</span>
+              </div>
+            )}
+
+            {/* primary CTA — adapts to what's entered */}
+            <button
+              onClick={ent >= tot ? onCashFull : onSave}
+              disabled={saving || marking || isNaN(ent) || ent <= 0}
+              style={{
+                width: "100%", padding: "14px",
+                borderRadius: 5, border: "none",
+                background: (isNaN(ent) || ent <= 0) ? c.subBg : ent >= tot ? "#10b981" : "#f59e0b",
+                color: (isNaN(ent) || ent <= 0) ? c.muted : "#fff",
+                fontFamily: "JetBrains Mono,monospace", fontSize: 12,
+                letterSpacing: "0.1em", textTransform: "uppercase",
+                fontWeight: 700,
+                cursor: (saving || marking || isNaN(ent) || ent <= 0) ? "not-allowed" : "pointer",
+                opacity: (saving || marking) ? 0.6 : 1,
+                boxShadow: (isNaN(ent) || ent <= 0) ? "none" : ent >= tot ? "0 4px 20px rgba(16,185,129,.35)" : "0 4px 16px rgba(245,158,11,.3)",
+                transition: "background .2s, box-shadow .2s",
+              }}
+            >
+              {(saving || marking) ? "Confirming…"
+                : (isNaN(ent) || ent <= 0) ? "Enter cash amount above"
+                : ent >= tot ? "✓ Confirm " + money(ent) + " — Mark as Paid"
+                : "Record " + money(ent) + " Partial Payment"}
+            </button>
+          </>
+        )}
+      </div>
     );
+  }
+
+  // EcoCash
+  const ecoSt = ECO[order.payment_status] ?? { label: order.payment_status, color: "#6b7280" };
+  return (
+    <div style={{ padding: "0 24px 4px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 16px", borderRadius: 5, background: ecoSt.color + "10", border: "1px solid " + ecoSt.color + "30", borderLeft: "3px solid " + ecoSt.color, marginBottom: 12 }}>
+        <div>
+          <div style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 10, letterSpacing: "0.12em", textTransform: "uppercase", color: ecoSt.color, marginBottom: 3 }}>{ecoSt.label}</div>
+          {order.payment_reference && (
+            <div style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 11, color: c.muted }}>Ref: {order.payment_reference}</div>
+          )}
+        </div>
+        <span style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 22, fontWeight: 700, color: ecoSt.color, letterSpacing: "-0.02em" }}>{money(tot)}</span>
+      </div>
+      {order.payment_status !== "paid" ? (
+        <button onClick={onEcoPaid} disabled={marking} style={{
+          width: "100%", padding: "13px", borderRadius: 5, border: "none",
+          background: "#10b981", color: "#fff",
+          fontFamily: "JetBrains Mono,monospace", fontSize: 11,
+          letterSpacing: "0.1em", textTransform: "uppercase",
+          fontWeight: 700, cursor: marking ? "not-allowed" : "pointer",
+          opacity: marking ? 0.6 : 1, boxShadow: "0 4px 20px rgba(16,185,129,.35)",
+        }}>
+          {marking ? "Confirming…" : "✓ Confirm EcoCash Received"}
+        </button>
+      ) : (
+        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "13px 16px", borderRadius: 5, background: "rgba(74,222,128,.08)", border: "1px solid rgba(74,222,128,.25)" }}>
+          <span style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 11, color: "#4ade80", letterSpacing: "0.1em" }}>✓ ECOCASH CONFIRMED</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────
+   ASSIGN BLOCK
+───────────────────────────────────────────────────────────── */
+function AssignBlock({ order, team, onAssign, c }) {
+  const current = order.assigned_to;
+
+  if (!team.length) {
+    return (
+      <div style={{ padding: "0 24px 20px" }}>
+        <p style={{ margin: 0, fontFamily: "Manrope,sans-serif", fontSize: 12, color: c.muted }}>
+          No active staff — add them in the Team page
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ padding: "0 24px 20px" }}>
+      <div style={{
+        borderRadius: 8,
+        border: "1px solid " + c.border,
+        overflow: "hidden",
+      }}>
+        {team.map((m, i) => {
+          const on      = current === m.id;
+          const col     = ac(m.name);
+          const isLast  = i === team.length - 1;
+
+          return (
+            <button
+              key={m.id}
+              onClick={() => onAssign(on ? "" : String(m.id))}
+              style={{
+                display: "flex", alignItems: "center", gap: 14,
+                width: "100%", padding: "13px 16px",
+                borderBottom: isLast ? "none" : "1px solid " + c.dimSep,
+                background: on
+                  ? (c.dark ? "rgba(255,255,255,.04)" : "rgba(0,0,0,.025)")
+                  : "transparent",
+                border: "none",
+                borderBottom: isLast ? "none" : "1px solid " + c.dimSep,
+                cursor: "pointer", textAlign: "left",
+                transition: "background .12s",
+              }}
+            >
+              {/* coloured avatar */}
+              <div style={{
+                width: 36, height: 36, borderRadius: 8, flexShrink: 0,
+                background: col + "18",
+                border: "1.5px solid " + col + (on ? "60" : "30"),
+                display: "flex", alignItems: "center", justifyContent: "center",
+                fontFamily: "JetBrains Mono,monospace", fontWeight: 700,
+                fontSize: 12, color: col,
+                letterSpacing: "0.03em",
+                transition: "border-color .15s",
+              }}>
+                {m.name.slice(0, 2).toUpperCase()}
+              </div>
+
+              {/* name + role */}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{
+                  fontFamily: "Manrope,sans-serif", fontSize: 13,
+                  fontWeight: on ? 600 : 400,
+                  color: on ? c.text : c.muted,
+                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                  transition: "color .12s",
+                }}>
+                  {m.name}
+                </div>
+                <div style={{
+                  fontFamily: "JetBrains Mono,monospace", fontSize: 9,
+                  color: c.muted, letterSpacing: "0.1em",
+                  textTransform: "uppercase", marginTop: 2,
+                }}>
+                  {m.role}
+                </div>
+              </div>
+
+              {/* assigned badge */}
+              {on ? (
+                <div style={{
+                  fontFamily: "JetBrains Mono,monospace", fontSize: 9,
+                  letterSpacing: "0.1em", textTransform: "uppercase",
+                  padding: "3px 8px", borderRadius: 3,
+                  background: col + "18", color: col,
+                  border: "1px solid " + col + "35",
+                  flexShrink: 0,
+                }}>
+                  Assigned
+                </div>
+              ) : (
+                <div style={{
+                  width: 16, height: 16, borderRadius: 4, flexShrink: 0,
+                  border: "1.5px solid " + c.border,
+                  background: "transparent",
+                }} />
+              )}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────
+   DETAIL PANEL
+───────────────────────────────────────────────────────────── */
+function DetailPanel({ order, team, c, amt, setAmt, saving, savingStatus, marking, onSave, onCashFull, onEcoPaid, onAssign, onAdvance }) {
+  const sc  = STATUS[order.status] ?? STATUS.pending;
+  const tot = parseFloat(order.total) || 0;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", flex: 1, overflow: "hidden" }}>
+
+      {/* Header */}
+      <div style={{
+        padding: "20px 24px 18px",
+        borderBottom: "1px solid " + c.border,
+        background: c.subBg, flexShrink: 0,
+      }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+          <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
+            <Avatar name={order.phone} sz={46} />
+            <div>
+              <div style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 14, fontWeight: 600, color: c.text, letterSpacing: "0.02em", lineHeight: 1.2 }}>
+                +{order.phone}
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 5 }}>
+                <span style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 10, color: c.muted }}>#{String(order.id).padStart(4, "0")}</span>
+                <span style={{ color: c.faint }}>·</span>
+                <span style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 10, color: c.muted }}>
+                  {new Date(order.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                </span>
+                <span style={{ color: c.faint }}>·</span>
+                <Tick at={order.created_at} />
+              </div>
+            </div>
+          </div>
+          <StatusChip status={order.status} />
+        </div>
+      </div>
+
+      {/* Scrollable body */}
+      <div style={{ flex: 1, overflowY: "auto", background: c.cardBg }}>
+
+        {/* Items */}
+        <SecHead c={c}>Order Items</SecHead>
+        <div style={{ padding: "4px 24px 20px" }}>
+          <div style={{ padding: "14px 16px", borderRadius: 5, background: c.subBg, border: "1px solid " + c.border }}>
+            <pre style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "Manrope,sans-serif", fontSize: 13, lineHeight: 1.7, color: c.text }}>
+              {order.order_text}
+            </pre>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 14, paddingTop: 12, borderTop: "1px dashed " + c.border }}>
+              <span style={{ fontFamily: "Manrope,sans-serif", fontSize: 12, color: c.muted }}>
+                via {PAY[order.payment_method]?.label ?? "EcoCash"}
+                {order.order_type && <span style={{ marginLeft: 8 }}>{order.order_type === "pickup" ? "· 🏃 Pickup" : "· 🚗 Delivery"}</span>}
+              </span>
+              <span style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 26, fontWeight: 700, color: c.hlText, letterSpacing: "-0.03em" }}>
+                {money(tot)}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* Divider */}
+        <div style={{ height: 1, background: c.border }} />
+
+        {/* Payment */}
+        <SecHead c={c}>{order.payment_method === "cash" ? "Cash Collection" : "EcoCash Payment"}</SecHead>
+        <PayBlock order={order} c={c} amt={amt} setAmt={setAmt} saving={saving} marking={marking} onSave={onSave} onCashFull={onCashFull} onEcoPaid={onEcoPaid} />
+
+        <div style={{ height: 1, background: c.border, margin: "16px 0 0" }} />
+
+        {/* Assign Staff */}
+        <SecHead c={c}>Assign to Staff</SecHead>
+        <AssignBlock order={order} team={team} onAssign={onAssign} c={c} />
+
+        <div style={{ height: 1, background: c.border, margin: "16px 0 0" }} />
+
+        {/* Status */}
+        <SecHead c={c}>Order Progress</SecHead>
+        <StatusBlock order={order} onAdvance={onAdvance} saving={savingStatus} c={c} />
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────
+   EMPTY STATE
+───────────────────────────────────────────────────────────── */
+function EmptyDetail({ orders, c }) {
+  const stats = [
+    { l: "Pending",   n: orders.filter(o => o.status === "pending").length,          col: "#f59e0b" },
+    { l: "Preparing", n: orders.filter(o => o.status === "preparing").length,        col: "#3b82f6" },
+    { l: "Ready",     n: orders.filter(o => o.status === "ready").length,             col: "#10b981" },
+    { l: "On Way",    n: orders.filter(o => o.status === "out_for_delivery").length, col: "#a78bfa" },
+  ];
+  return (
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 24, background: c.cardBg, padding: 32 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, width: "100%", maxWidth: 300 }}>
+        {stats.map(s => (
+          <div key={s.l} style={{
+            padding: "20px 16px", borderRadius: 6, textAlign: "center",
+            border: "1px solid " + (s.n > 0 ? s.col + "30" : c.border),
+            background: s.n > 0 ? s.col + "08" : c.subBg,
+            borderLeft: s.n > 0 ? "3px solid " + s.col : "3px solid transparent",
+            transition: "all .2s",
+          }}>
+            <div style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 40, fontWeight: 700, color: s.n > 0 ? s.col : c.faint, letterSpacing: "-0.04em", lineHeight: 1 }}>
+              {s.n}
+            </div>
+            <div style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 9, fontWeight: 600, letterSpacing: "0.14em", textTransform: "uppercase", color: s.n > 0 ? s.col : c.muted, marginTop: 8 }}>
+              {s.l}
+            </div>
+          </div>
+        ))}
+      </div>
+      <p style={{ margin: 0, fontFamily: "Manrope,sans-serif", fontSize: 13, color: c.muted, letterSpacing: "0.02em" }}>
+        Select an order to manage it
+      </p>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────
+   MAIN
+───────────────────────────────────────────────────────────── */
+export default function POS() {
+  const { theme: t } = useTheme();
+  const c = chrome(t);
+  const isMobile = useIsMobile();
+
+  const [orders, setOrders]             = useState([]);
+  const [team, setTeam]                 = useState([]);
+  const [selected, setSelected]         = useState(null);
+  const [filter, setFilter]             = useState("all");
+  const [search, setSearch]             = useState("");
+  const [loading, setLoading]           = useState(true);
+  const [refreshing, setRefreshing]     = useState(false);
+  const [lastRefresh, setLastRefresh]   = useState(null);
+  const [amt, setAmt]                   = useState("");
+  const [saving, setSaving]             = useState(false);
+  const [savingStatus, setSavingStatus] = useState(false);
+  const [marking, setMarking]           = useState(false);
+
+  useEffect(() => { injectFonts(); }, []);
+
+  const fetchQueue = useCallback(async (showSpinner = false) => {
+    if (showSpinner) setRefreshing(true);
+    try {
+      const data = await apiFetch("/api/orders/pos-queue");
+      setOrders(data);
+      setLastRefresh(new Date());
+      setSelected(prev => prev ? (data.find(o => o.id === prev.id) ?? prev) : null);
+    } catch { /* silent */ } finally { setLoading(false); setRefreshing(false); }
+  }, []);
+
+  const fetchTeam = useCallback(async () => {
+    try { const data = await apiFetch("/api/team"); setTeam(data.filter(m => m.is_active)); }
+    catch { setTeam([]); }
+  }, []);
+
+  useEffect(() => {
+    fetchQueue(); fetchTeam();
+    const id = setInterval(fetchQueue, 30_000);
+    return () => clearInterval(id);
+  }, [fetchQueue, fetchTeam]);
+
+  useEffect(() => { if (selected) setAmt((parseFloat(selected.amount_paid) || 0) > 0 ? String(selected.amount_paid) : ""); }, [selected?.id]);
+
+  const patchOrder = async (id, body) => {
+    const data = await apiFetch("/api/orders/" + id, { method: "PATCH", body: JSON.stringify(body) });
+    if (data.status === "completed" || data.status === "pos") {
+      setOrders(prev => prev.filter(o => o.id !== id));
+      if (selected?.id === id) setSelected(null);
+    } else {
+      setOrders(prev => prev.map(o => o.id === id ? data : o));
+      if (selected?.id === id) setSelected(data);
+    }
+    return data;
+  };
+
+  const handleSave = async () => {
+    if (!selected) return; const v = parseFloat(amt);
+    if (isNaN(v) || v < 0) return; setSaving(true);
+    try { const p = { amount_paid: v }; if (v >= parseFloat(selected.total)) p.payment_status = "paid"; await patchOrder(selected.id, p); }
+    finally { setSaving(false); }
+  };
+  const handleCashFull = async () => {
+    if (!selected) return; setMarking(true);
+    const statedAmt = parseFloat(selected.amount_paid) || 0;
+    const confirmAmt = statedAmt >= parseFloat(selected.total) ? statedAmt : parseFloat(selected.total);
+    try { await patchOrder(selected.id, { payment_status: "paid", amount_paid: confirmAmt }); }
+    finally { setMarking(false); }
+  };
+  const handleEcoPaid = async () => {
+    if (!selected) return; setMarking(true);
+    try { await patchOrder(selected.id, { payment_status: "paid" }); } finally { setMarking(false); }
+  };
+  const handleAssign = async (memberId) => {
+    if (!selected) return; setSaving(true);
+    try { await patchOrder(selected.id, { assigned_to: memberId ? parseInt(memberId) : null }); } finally { setSaving(false); }
+  };
+  const handleAdvance = async () => {
+    if (!selected) return; const next = nextSt(selected.status, selected); if (!next) return;
+    setSavingStatus(true);
+    try {
+      await patchOrder(selected.id, { status: next });
+      if (next === "completed") { setOrders(prev => prev.filter(o => o.id !== selected.id)); setSelected(null); }
+    } finally { setSavingStatus(false); }
+  };
+
+  const filtered = useMemo(() => {
+    let list = filter === "all" ? orders : orders.filter(o => o.status === filter);
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      list = list.filter(o => o.phone.toLowerCase().includes(q) || (o.order_text ?? "").toLowerCase().includes(q) || String(o.id).includes(q));
+    }
+    return list;
+  }, [orders, filter, search]);
+
+  return (
+    <>
+      <style>{`
+        @keyframes posIn { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: ${c.faint}; border-radius: 2px; }
+      `}</style>
+
+      <div style={{ display: "flex", height: isMobile ? "auto" : "100vh", minHeight: isMobile ? "100vh" : undefined, overflow: isMobile ? "auto" : "hidden", background: t.bg, color: c.text, fontFamily: "Manrope,sans-serif" }}>
+        <Sidebar />
+
+        <div style={{ display: "flex", flexDirection: isMobile ? "column" : "row", flex: 1, overflow: isMobile ? "visible" : "hidden" }}>
+
+          {/* ── LEFT: QUEUE ── */}
+          <div style={{
+            width: isMobile ? "100%" : 360, flexShrink: 0,
+            display: "flex", flexDirection: "column",
+            borderRight: isMobile ? "none" : "1px solid " + c.border,
+            borderBottom: isMobile ? "1px solid " + c.border : "none",
+            background: c.queueBg,
+            overflow: "hidden",
+            maxHeight: isMobile ? (selected ? 320 : undefined) : undefined,
+          }}>
+            {/* Queue header */}
+            <div style={{ padding: "20px 20px 14px", borderBottom: "1px solid " + c.border, flexShrink: 0 }}>
+              <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 14 }}>
+                <div>
+                  <div style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 9, letterSpacing: "0.2em", textTransform: "uppercase", color: c.muted, marginBottom: 6 }}>
+                    Live Queue
+                  </div>
+                  <h1 style={{ fontFamily: "Syne,sans-serif", fontSize: 24, fontWeight: 800, letterSpacing: "-0.02em", color: c.text, margin: 0, lineHeight: 1 }}>
+                    Orders
+                  </h1>
+                  <div style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 10, color: c.muted, marginTop: 5, letterSpacing: "0.04em" }}>
+                    {orders.length} active
+                    {lastRefresh && " · " + lastRefresh.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+                  </div>
+                </div>
+                <button onClick={() => fetchQueue(true)} title="Refresh" style={{
+                  width: 34, height: 34, borderRadius: 4, border: "1px solid " + c.border,
+                  background: c.subBg, color: c.muted, cursor: "pointer", fontSize: 16,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  transform: refreshing ? "rotate(360deg)" : "none",
+                  transition: "transform .4s",
+                }}>↻</button>
+              </div>
+
+              {/* Search */}
+              <div style={{ position: "relative" }}>
+                <span style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", fontFamily: "JetBrains Mono,monospace", fontSize: 12, color: c.muted, pointerEvents: "none" }}>⌕</span>
+                <input
+                  value={search} onChange={e => setSearch(e.target.value)}
+                  placeholder="Search phone, item, ID…"
+                  style={{
+                    width: "100%", boxSizing: "border-box",
+                    padding: "9px 32px 9px 30px",
+                    borderRadius: 4, border: "1px solid " + c.border,
+                    background: c.inputBg, color: c.text,
+                    fontFamily: "Manrope,sans-serif", fontSize: 12, outline: "none",
+                    transition: "border-color .15s",
+                  }}
+                  onFocus={e => e.target.style.borderColor = "rgba(56,189,248,.45)"}
+                  onBlur={e => e.target.style.borderColor = c.border}
+                />
+                {search && (
+                  <button onClick={() => setSearch("")} style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", color: c.muted, cursor: "pointer", fontSize: 18, lineHeight: 1, padding: 0 }}>×</button>
+                )}
+              </div>
+            </div>
+
+            {/* Filter tabs */}
+            <FilterBar orders={orders} filter={filter} setFilter={setFilter} c={c} />
+
+            {/* List */}
+            <div style={{ flex: 1, overflowY: "auto" }}>
+              {loading ? (
+                <Skeleton c={c} />
+              ) : !filtered.length ? (
+                <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: 200, gap: 8 }}>
+                  <div style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 28, color: c.faint }}>◌</div>
+                  <p style={{ margin: 0, fontFamily: "Manrope,sans-serif", fontSize: 13, color: c.muted }}>
+                    {search ? "No results" : "No active orders"}
+                  </p>
+                  {search && (
+                    <button onClick={() => setSearch("")} style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 10, color: "#38bdf8", background: "none", border: "none", cursor: "pointer", letterSpacing: "0.08em", textTransform: "uppercase" }}>
+                      Clear Search
+                    </button>
+                  )}
+                </div>
+              ) : (
+                filtered.map(order => (
+                  <OrderCard key={order.id} order={order} selected={selected?.id === order.id} onClick={() => setSelected(order)} c={c} />
+                ))
+              )}
+            </div>
+          </div>
+
+          {/* ── RIGHT: DETAIL ── */}
+          {selected ? (
+            <DetailPanel
+              order={selected} team={team} c={c}
+              amt={amt} setAmt={setAmt}
+              saving={saving} savingStatus={savingStatus} marking={marking}
+              onSave={handleSave} onCashFull={handleCashFull} onEcoPaid={handleEcoPaid}
+              onAssign={handleAssign} onAdvance={handleAdvance}
+            />
+          ) : (
+            <EmptyDetail orders={orders} c={c} />
+          )}
+        </div>
+      </div>
+    </>
+  );
 }

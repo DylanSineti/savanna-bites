@@ -1,6 +1,8 @@
 import { useState, useRef, useEffect } from 'react'
+import { createPortal } from 'react-dom'
 import { Link, usePage, router } from '@inertiajs/react'
 import { useTheme } from '../Context/ThemeContext'
+import { useIsMobile } from '../hooks/useIsMobile'
 
 const SECTIONS = [
   {
@@ -35,6 +37,18 @@ const SECTIONS = [
       {
         label: 'Analytics', href: '/analytics',
         icon: <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 12l4-4 3 3 5-6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
+      },
+      {
+        label: 'Reviews', href: '/reviews',
+        icon: <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 2l1.5 3 3.5.5-2.5 2.5.6 3.5L8 10l-3.1 1.5.6-3.5L3 5.5 6.5 5 8 2z" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round"/></svg>
+      },
+      {
+        label: 'Team', href: '/team',
+        icon: <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="5.5" cy="5" r="2.5" stroke="currentColor" strokeWidth="1.5"/><path d="M1 13c0-2.49 2.01-4.5 4.5-4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/><circle cx="11.5" cy="7" r="2" stroke="currentColor" strokeWidth="1.5"/><path d="M8.5 13c0-1.66 1.34-3 3-3s3 1.34 3 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+      },
+      {
+        label: 'Broadcast', href: '/broadcast',
+        icon: <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 5.5C2 4.12 3.12 3 4.5 3h7C12.88 3 14 4.12 14 5.5v4C14 10.88 12.88 12 11.5 12H9l-2.5 2v-2H4.5C3.12 12 2 10.88 2 9.5v-4z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/><path d="M5 7h6M5 9.5h3.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/></svg>
       },
     ]
   },
@@ -96,7 +110,9 @@ export default function Sidebar() {
   const { theme: t, dark, toggle } = useTheme()
   const [col, setCol] = useState(false)
   const [showProfile, setShowProfile] = useState(false)
+  const [moreOpen, setMoreOpen] = useState(false)
   const profileRef = useRef(null)
+  const isMobile = useIsMobile()
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -130,6 +146,164 @@ export default function Sidebar() {
     </div>
   )
 
+  /* ─── MOBILE BOTTOM NAV ─────────────────────────────────────── */
+  if (isMobile) {
+    const allItems = SECTIONS.flatMap(s => s.items)
+    const primary  = allItems.slice(0, 4) // Orders, Menu, Customers, POS
+    const secondary = allItems.slice(4)   // Analytics, Reviews, Team, Broadcast
+
+    return createPortal(
+      <>
+        {/* Fixed bottom bar */}
+        <nav style={{
+          position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 9999,
+          display: 'flex', alignItems: 'stretch',
+          background: dark ? '#1a1a1a' : '#ffffff',
+          borderTop: `1px solid ${dark ? '#2e2e2e' : '#e0e0da'}`,
+          boxShadow: '0 -4px 24px rgba(0,0,0,0.18)',
+          paddingBottom: 'env(safe-area-inset-bottom)',
+        }}>
+          {primary.map(item => {
+            const active = url === item.href
+            return (
+              <Link key={item.label} href={item.href}
+                onClick={() => setMoreOpen(false)}
+                style={{
+                  flex: 1, display: 'flex', flexDirection: 'column',
+                  alignItems: 'center', justifyContent: 'center', gap: 3,
+                  padding: '10px 0',
+                  color: active ? (dark ? '#e8d5a3' : '#92600a') : (dark ? '#aaaaaa' : '#555555'),
+                  textDecoration: 'none',
+                  background: active ? (dark ? 'rgba(232,213,163,.08)' : 'rgba(146,96,10,.06)') : 'transparent',
+                  transition: 'color .15s, background .15s',
+                  fontSize: 10,
+                  fontWeight: active ? 700 : 500,
+                  fontFamily: 'Manrope,sans-serif',
+                  letterSpacing: '0.03em',
+                  minHeight: 56,
+                }}>
+                <div style={{ width: 22, height: 22, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  {item.icon}
+                </div>
+                {item.label}
+              </Link>
+            )
+          })}
+
+          {/* More button */}
+          <button
+            onClick={() => setMoreOpen(o => !o)}
+            style={{
+              flex: 1, display: 'flex', flexDirection: 'column',
+              alignItems: 'center', justifyContent: 'center', gap: 3,
+              padding: '10px 0', minHeight: 56,
+              color: moreOpen ? (dark ? '#e8d5a3' : '#92600a') : (dark ? '#aaaaaa' : '#555555'),
+              background: moreOpen ? (dark ? 'rgba(232,213,163,.08)' : 'rgba(146,96,10,.06)') : 'transparent',
+              border: 'none', cursor: 'pointer', transition: 'color .15s, background .15s',
+              fontSize: 10, fontWeight: moreOpen ? 700 : 500,
+              fontFamily: 'Manrope,sans-serif', letterSpacing: '0.03em',
+            }}>
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+              <circle cx="4.5" cy="9" r="1.5" fill="currentColor" />
+              <circle cx="9" cy="9" r="1.5" fill="currentColor" />
+              <circle cx="13.5" cy="9" r="1.5" fill="currentColor" />
+            </svg>
+            More
+          </button>
+        </nav>
+
+        {/* More drawer (slide up) */}
+        {moreOpen && (
+          <div
+            onClick={() => setMoreOpen(false)}
+            style={{
+              position: 'fixed', inset: 0, zIndex: 199,
+              background: 'rgba(0,0,0,.5)', backdropFilter: 'blur(2px)',
+            }}
+          />
+        )}
+        <div style={{
+          position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 9998,
+          background: dark ? '#1a1a1a' : '#ffffff',
+          borderTop: `1px solid ${dark ? '#2e2e2e' : '#e0e0da'}`,
+          borderRadius: '16px 16px 0 0',
+          transform: moreOpen ? 'translateY(0)' : 'translateY(calc(100% - env(safe-area-inset-bottom, 0px)))',
+          transition: 'transform .3s cubic-bezier(.4,0,.2,1)',
+          padding: '16px 0 8px',
+          paddingBottom: 'calc(56px + env(safe-area-inset-bottom))',
+          boxShadow: '0 -8px 40px rgba(0,0,0,.35)',
+        }}>
+          {/* Drag handle */}
+          <div style={{ width: 36, height: 4, borderRadius: 2, background: t.border, margin: '0 auto 16px' }} />
+
+          {/* Secondary nav items */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, padding: '0 12px 12px' }}>
+            {secondary.map(item => {
+              const active = url === item.href
+              return (
+                <Link key={item.label} href={item.href}
+                  onClick={() => setMoreOpen(false)}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 10,
+                    padding: '12px 14px', borderRadius: 10,
+                    textDecoration: 'none',
+                    background: active ? (dark ? 'rgba(255,255,255,.08)' : 'rgba(0,0,0,.06)') : (dark ? 'rgba(255,255,255,.03)' : 'rgba(0,0,0,.02)'),
+                    border: `1px solid ${active ? t.hlText + '30' : t.border}`,
+                    color: active ? t.hlText : t.muted,
+                  }}>
+                  <div style={{ width: 18, height: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                    {item.icon}
+                  </div>
+                  <span style={{ fontSize: 13, fontFamily: 'Manrope,sans-serif', fontWeight: active ? 600 : 400 }}>
+                    {item.label}
+                  </span>
+                </Link>
+              )
+            })}
+          </div>
+
+          <div style={{ height: 1, background: t.border, margin: '0 12px 12px' }} />
+
+          {/* Theme + Settings + Profile + Logout */}
+          <div style={{ padding: '0 12px' }}>
+            <div onClick={toggle}
+              style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 14px', borderRadius: 10, cursor: 'pointer', marginBottom: 4 }}
+              onMouseEnter={e => e.currentTarget.style.background = t.rowHover}
+              onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+              <div style={{ width: 18, height: 18, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                {dark ? <MoonSVG color={t.muted} /> : <SunSVG color={t.muted} />}
+              </div>
+              <span style={{ flex: 1, fontSize: 13, fontFamily: 'Manrope,sans-serif', color: t.muted }}>{dark ? 'Dark mode' : 'Light mode'}</span>
+              <Toggle dark={dark} />
+            </div>
+
+            <div onClick={() => { setMoreOpen(false); router.visit('/settings') }}
+              style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 14px', borderRadius: 10, cursor: 'pointer', marginBottom: 4 }}
+              onMouseEnter={e => e.currentTarget.style.background = t.rowHover}
+              onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+              <svg width="16" height="16" viewBox="0 0 14 14" fill="none" style={{ color: t.muted }}>
+                <circle cx="7" cy="7" r="2" stroke="currentColor" strokeWidth="1.3" />
+                <path d="M7 1v1.5M7 11.5V13M1 7h1.5M11.5 7H13M2.9 2.9l1.06 1.06M10.04 10.04l1.06 1.06M2.9 11.1l1.06-1.06M10.04 3.96l1.06-1.06" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+              </svg>
+              <span style={{ fontSize: 13, fontFamily: 'Manrope,sans-serif', color: t.muted }}>Settings</span>
+            </div>
+
+            <div onClick={() => { setMoreOpen(false); router.post('/logout') }}
+              style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 14px', borderRadius: 10, cursor: 'pointer', marginBottom: 4 }}
+              onMouseEnter={e => e.currentTarget.style.background = t.rowHover}
+              onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+              <svg width="16" height="16" viewBox="0 0 14 14" fill="none" style={{ color: '#f87171' }}>
+                <path d="M5 2H3a1 1 0 00-1 1v8a1 1 0 001 1h2M9 10l4-3-4-3M13 7H5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+              <span style={{ fontSize: 13, fontFamily: 'Manrope,sans-serif', color: '#f87171' }}>Log out</span>
+            </div>
+          </div>
+        </div>
+      </>,
+      document.body
+    )
+  }
+
   return (
     <aside style={{
       width: col ? '64px' : '260px',
@@ -139,7 +313,7 @@ export default function Sidebar() {
       display: 'flex', flexDirection: 'column',
       transition: 'width .25s cubic-bezier(.4,0,.2,1), min-width .25s cubic-bezier(.4,0,.2,1)',
       overflow: 'hidden', flexShrink: 0,
-      position: 'relative',
+      position: 'relative', zIndex: 2,
     }}>
 
       {/* ── TOP ── */}

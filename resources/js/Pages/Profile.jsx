@@ -1,13 +1,25 @@
 import { useState, useEffect } from 'react'
 import Sidebar from '../Components/Sidebar'
 import { useTheme } from '../Context/ThemeContext'
+import { useIsMobile } from '../hooks/useIsMobile'
+
+function injectFonts() {
+  if (document.getElementById('app-fonts')) return
+  const l = document.createElement('link')
+  l.id = 'app-fonts'; l.rel = 'stylesheet'
+  l.href = 'https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=JetBrains+Mono:wght@400;500;600&family=Manrope:wght@300;400;500;600&display=swap'
+  document.head.appendChild(l)
+}
 
 export default function Profile() {
   const { theme: t } = useTheme()
+  const isMobile = useIsMobile()
   const [user,    setUser]    = useState({ name: '', email: '' })
   const [pass,    setPass]    = useState({ current_password: '', password: '', password_confirmation: '' })
   const [msg,     setMsg]     = useState({ profile: '', password: '' })
   const [loading, setLoading] = useState({ profile: false, password: false })
+
+  useEffect(() => { injectFonts() }, [])
 
   useEffect(() => {
     fetch('/api/profile').then(r => r.json()).then(setUser)
@@ -81,14 +93,15 @@ export default function Profile() {
   )
 
   return (
-    <div className="flex min-h-screen" style={{background: t.bg, color: t.text, fontFamily:"'DM Sans',sans-serif", transition:'all .2s'}}>
+    <div style={{display:'flex', height:'100vh', overflow:'hidden', background: t.bg, color: t.text, fontFamily:'Manrope,sans-serif', transition:'background .2s'}}>
       <Sidebar />
-      <main style={{flex: 1, padding: '32px', overflowY: 'auto', maxWidth: '640px'}}>
+      <main style={{flex: 1, padding: isMobile ? '20px 16px 84px' : '28px 36px 56px', overflowY: 'auto'}}>
 
         {/* HEADER */}
         <div style={{marginBottom: '32px'}}>
-          <h1 style={{fontSize: '20px', fontWeight: 500, letterSpacing: '-.4px'}}>Profile</h1>
-          <p style={{fontSize: '13px', color: t.muted, marginTop: '4px'}}>Manage your personal information</p>
+          <div style={{fontFamily:'JetBrains Mono,monospace', fontSize:10, letterSpacing:'0.2em', textTransform:'uppercase', color:t.muted, marginBottom:8}}>Account</div>
+          <h1 style={{fontFamily:'Syne,sans-serif', fontSize:36, fontWeight:800, letterSpacing:'-0.03em', lineHeight:1, color:t.text, margin:0}}>Profile</h1>
+          <p style={{fontFamily:'Manrope,sans-serif', fontSize:13, fontWeight:300, color:t.muted, marginTop:5}}>Manage your personal information</p>
         </div>
 
         {/* AVATAR */}

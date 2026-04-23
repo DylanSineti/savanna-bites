@@ -1,16 +1,30 @@
 import { useState, useEffect } from 'react'
 import Sidebar from '../Components/Sidebar'
 import { useTheme } from '../Context/ThemeContext'
+import { useIsMobile } from '../hooks/useIsMobile'
+
+function injectFonts() {
+  if (document.getElementById('app-fonts')) return
+  const l = document.createElement('link')
+  l.id = 'app-fonts'; l.rel = 'stylesheet'
+  l.href = 'https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=JetBrains+Mono:wght@400;500;600&family=Manrope:wght@300;400;500;600&display=swap'
+  document.head.appendChild(l)
+}
 
 export default function Settings() {
   const { theme: t } = useTheme()
+  const isMobile = useIsMobile()
   const [form,    setForm]    = useState({
-    restaurant_name: '', whatsapp_phone_id: '',
-    whatsapp_token: '', admin_whatsapp: '',
+    restaurant_name: '', tagline: '',
+    whatsapp_phone_id: '', whatsapp_token: '', admin_whatsapp: '',
+    contact_phone: '', business_hours: '',
+    paynow_integration_id: '', paynow_integration_key: '', paynow_auth_email: '',
   })
   const [msg,     setMsg]     = useState('')
   const [loading, setLoading] = useState(false)
   const [show,    setShow]    = useState(false)
+
+  useEffect(() => { injectFonts() }, [])
 
   useEffect(() => {
     fetch('/api/settings').then(r => r.json()).then(setForm)
@@ -67,19 +81,25 @@ export default function Settings() {
   )
 
   return (
-    <div className="flex min-h-screen" style={{background: t.bg, color: t.text, fontFamily:"'DM Sans',sans-serif", transition:'all .2s'}}>
+    <div style={{display:'flex', height:'100vh', overflow:'hidden', background: t.bg, color: t.text, fontFamily:'Manrope,sans-serif', transition:'background .2s'}}>
       <Sidebar />
-      <main style={{flex: 1, padding: '32px', overflowY: 'auto', maxWidth: '640px'}}>
+      <main style={{flex: 1, padding: isMobile ? '20px 16px 84px' : '28px 36px 56px', overflowY: 'auto'}}>
 
         {/* HEADER */}
         <div style={{marginBottom: '32px'}}>
-          <h1 style={{fontSize: '20px', fontWeight: 500, letterSpacing: '-.4px'}}>Settings</h1>
-          <p style={{fontSize: '13px', color: t.muted, marginTop: '4px'}}>Configure your restaurant and WhatsApp bot</p>
+          <div style={{fontFamily:'JetBrains Mono,monospace', fontSize:10, letterSpacing:'0.2em', textTransform:'uppercase', color:t.muted, marginBottom:8}}>Configuration</div>
+          <h1 style={{fontFamily:'Syne,sans-serif', fontSize:36, fontWeight:800, letterSpacing:'-0.03em', lineHeight:1, color:t.text, margin:0}}>Settings</h1>
+          <p style={{fontFamily:'Manrope,sans-serif', fontSize:13, fontWeight:300, color:t.muted, marginTop:5}}>Configure your restaurant and WhatsApp bot</p>
         </div>
 
         {/* RESTAURANT */}
         {card('Restaurant', 'Your restaurant details shown to customers', (
-          input('Restaurant Name', 'restaurant_name', 'text', 'This appears in WhatsApp welcome messages')
+          <>
+            {input('Restaurant Name', 'restaurant_name', 'text', 'This appears in WhatsApp welcome messages')}
+            {input('Tagline', 'tagline', 'text', 'Short description shown to customers')}
+            {input('Contact Phone', 'contact_phone', 'text', 'Customer-facing phone number e.g. 263771234567')}
+            {input('Business Hours', 'business_hours', 'text', 'e.g. Mon–Sun 9am–9pm')}
+          </>
         ))}
 
         {/* WHATSAPP */}
@@ -121,26 +141,34 @@ export default function Settings() {
           </>
         ))}
 
-        {/* WEBHOOK INFO */}
-        {card('Webhook URL', 'Use this URL in your Meta Developer dashboard', (
-          <div style={{
-            display: 'flex', alignItems: 'center', gap: '10px',
-            padding: '10px 12px', borderRadius: '8px',
-            background: t.subBg, border: `1px solid ${t.border}`,
-          }}>
-            <code style={{fontSize: '12px', color: t.hlText, flex: 1, wordBreak: 'break-all'}}>
-              {window.location.origin}/api/webhook
-            </code>
-            <button
-              onClick={() => navigator.clipboard.writeText(`${window.location.origin}/api/webhook`)}
-              style={{
-                padding: '5px 10px', borderRadius: '6px', fontSize: '11px',
-                background: t.navActive, border: `1px solid ${t.border}`,
-                color: t.muted, cursor: 'pointer', flexShrink: 0,
-              }}>
-              Copy
-            </button>
-          </div>
+        {/* PAYNOW */}
+        {card('Paynow Payments', 'Your Paynow integration credentials for online payments', (
+          <>
+            {input('Integration ID', 'paynow_integration_id', 'text', 'From your Paynow merchant dashboard')}
+            {input('Integration Key', 'paynow_integration_key', 'password', 'Leave blank to keep existing key')}
+            {input('Auth Email', 'paynow_auth_email', 'email', 'Email registered with Paynow')}
+          </>
+        ))}
+
+        {/* WEBHOOK SETUP */}
+        {card('Webhook Setup', 'Use these in your Meta Developer dashboard under WhatsApp → Configuration', (
+          <>
+            <div style={{marginBottom: '16px'}}>
+              <label style={{display:'block',fontSize:'11px',color:t.muted,letterSpacing:'1px',textTransform:'uppercase',marginBottom:'6px'}}>Webhook URL</label>
+              <div style={{display:'flex',alignItems:'center',gap:'10px',padding:'10px 12px',borderRadius:'8px',background:t.subBg,border:`1px solid ${t.border}`}}>
+                <code style={{fontSize:'12px',color:t.hlText,flex:1,wordBreak:'break-all'}}>{window.location.origin}/api/webhook</code>
+                <button onClick={()=>navigator.clipboard.writeText(`${window.location.origin}/api/webhook`)} style={{padding:'5px 10px',borderRadius:'6px',fontSize:'11px',background:t.navActive,border:`1px solid ${t.border}`,color:t.muted,cursor:'pointer',flexShrink:0}}>Copy</button>
+              </div>
+            </div>
+            <div>
+              <label style={{display:'block',fontSize:'11px',color:t.muted,letterSpacing:'1px',textTransform:'uppercase',marginBottom:'6px'}}>Verify Token</label>
+              <div style={{display:'flex',alignItems:'center',gap:'10px',padding:'10px 12px',borderRadius:'8px',background:t.subBg,border:`1px solid ${t.border}`}}>
+                <code style={{fontSize:'12px',color:t.hlText,flex:1,wordBreak:'break-all'}}>{form.verify_token}</code>
+                <button onClick={()=>navigator.clipboard.writeText(form.verify_token||'')} style={{padding:'5px 10px',borderRadius:'6px',fontSize:'11px',background:t.navActive,border:`1px solid ${t.border}`,color:t.muted,cursor:'pointer',flexShrink:0}}>Copy</button>
+              </div>
+              <p style={{fontSize:'11px',color:t.muted,marginTop:'4px'}}>Paste this as the Verify Token when subscribing in Meta Developer</p>
+            </div>
+          </>
         ))}
 
         {/* SAVE BUTTON */}

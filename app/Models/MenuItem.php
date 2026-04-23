@@ -21,6 +21,11 @@ class MenuItem extends Model
         'sort_order',
     ];
 
+    public function restaurant()
+    {
+        return $this->belongsTo(Restaurant::class);
+    }
+
     protected $casts = [
         'price'     => 'float',
         'available' => 'boolean',

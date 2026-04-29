@@ -323,7 +323,7 @@ function MenuCard({ item, onToggle, onDelete, onUploadImage }) {
           letterSpacing: '-0.01em',
           marginBottom: 14,
         }}>
-          R{Number(item.price).toFixed(2)}
+          USD {Number(item.price).toFixed(2)}
         </div>
 
         {/* ACTIONS */}

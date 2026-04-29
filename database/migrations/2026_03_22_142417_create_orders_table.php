@@ -17,6 +17,7 @@ return new class extends Migration
             $table->text('order_text');
             $table->decimal('total', 8, 2)->nullable();
             $table->string('status')->default('pending');
+            $table->timestamp('payment_confirmed_at')->nullable();
             $table->timestamps();
         });
     }

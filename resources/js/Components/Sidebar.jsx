@@ -499,7 +499,7 @@ export default function Sidebar() {
                     border: '1px solid #2a4a2a', flexShrink: 0,
                   }}>LT</div>
                   <div>
-                    <div style={{ fontSize: '13px', fontWeight: 600, color: t.text }}>Loyd T.</div>
+                    <div style={{ fontSize: '13px', fontWeight: 600, color: t.text }}>Dylan Sineti</div>
                     <div style={{ fontSize: '11px', color: t.muted, marginTop: '1px' }}>
                       admin@savannabites.com
                     </div>

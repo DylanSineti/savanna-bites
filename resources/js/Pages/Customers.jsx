@@ -37,6 +37,14 @@ function chrome(t) {
 }
 
 /* ─────────────────────────────────────────────────────────────
+   TEXT HELPERS
+───────────────────────────────────────────────────────────── */
+function humanize(text) {
+  if (text == null) return text
+  return String(text).replace(/_/g, ' ')
+}
+
+/* ─────────────────────────────────────────────────────────────
    SPEND BAR
 ───────────────────────────────────────────────────────────── */
 function SpendBar({ value, max, c, active }) {
@@ -168,7 +176,7 @@ function OrderItem({ order, c, index }) {
     }}>
       <div style={{ flex: 1, minWidth: 0, paddingRight: 12 }}>
         <div style={{ fontFamily: 'Manrope,sans-serif', fontSize: 12, color: c.text, lineHeight: 1.4 }}>
-          {order.order_text}
+          {humanize(order.order_text)}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 3 }}>
           <span style={{ fontFamily: 'JetBrains Mono,monospace', fontSize: 10, color: c.muted, letterSpacing: '0.04em' }}>

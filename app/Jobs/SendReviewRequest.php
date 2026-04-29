@@ -3,70 +3,69 @@
 namespace App\Jobs;
 
 use App\Models\Order;
-use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
-use Illuminate\Foundation\Bus\Dispatchable;
-use Illuminate\Queue\InteractsWithQueue;
-use Illuminate\Queue\SerializesModels;
+use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
 class SendReviewRequest implements ShouldQueue
 {
-    use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
+    use Queueable;
 
-    public function __construct(public readonly int $orderId) {}
+    public function __construct(public int $orderId) {}
 
     public function handle(): void
     {
-        /** @var Order|null $order */
-        $order = Order::with('restaurant')->find($this->orderId);
+        $order = Order::find($this->orderId);
 
-        if (!$order || $order->review_sent || !$order->restaurant) {
+        // Skip if order gone, already reviewed, or not completed
+        if (!$order || $order->review_sent || $order->phone === 'POS') {
             return;
         }
 
-        $restaurant = $order->restaurant;
-        $phoneId    = $restaurant->whatsapp_phone_id;
-        $token      = $restaurant->whatsapp_token;
+        /** @var Order $order */
 
-        if (!$phoneId || !$token) {
-            Log::warning("SendReviewRequest: missing WhatsApp credentials for restaurant #{$restaurant->id}");
-            return;
-        }
+        $phoneId = env('WHATSAPP_PHONE_ID');
+        $token   = env('WHATSAPP_TOKEN');
 
-        $payload = [
+        if (!$phoneId || !$token) return;
+
+        $message = [
             'messaging_product' => 'whatsapp',
             'to'                => $order->phone,
             'type'              => 'interactive',
             'interactive'       => [
-                'type' => 'button',
-                'body' => [
+                'type'   => 'button',
+                'body'   => [
                     'text' =>
-                        "⭐ *How was your order?*\n\n" .
-                        "Hi! We hope you enjoyed your {$restaurant->name} order #{$order->id}. " .
-                        "Your feedback helps us serve you better. 🙏",
+                        "⭐ *How was your Savanna Bites experience?*\n\n" .
+                        "We hope you loved your meal! Your feedback helps us serve you better.\n\n" .
+                        "_Tap a star to rate your order #{$order->id}:_",
                 ],
+                'footer' => ['text' => 'Quick 1-tap review — takes 5 seconds!'],
                 'action' => [
                     'buttons' => [
-                        ['type' => 'reply', 'reply' => ['id' => "review_good_{$order->id}", 'title' => '😍 Loved it!']],
-                        ['type' => 'reply', 'reply' => ['id' => "review_ok_{$order->id}",   'title' => '😐 It was okay']],
-                        ['type' => 'reply', 'reply' => ['id' => "review_bad_{$order->id}",  'title' => '😞 Not great']],
+                        ['type' => 'reply', 'reply' => ['id' => "review_good_{$order->id}",    'title' => '⭐⭐⭐⭐⭐ Amazing']],
+                        ['type' => 'reply', 'reply' => ['id' => "review_ok_{$order->id}",      'title' => '⭐⭐⭐ It was OK']],
+                        ['type' => 'reply', 'reply' => ['id' => "review_bad_{$order->id}",     'title' => '⭐ Not Happy']],
                     ],
                 ],
             ],
         ];
 
-        $response = Http::withToken($token)
-            ->post("https://graph.facebook.com/v19.0/{$phoneId}/messages", $payload);
+        try {
+            $response = Http::withToken($token)->post(
+                "https://graph.facebook.com/v19.0/{$phoneId}/messages",
+                $message
+            );
 
-        if ($response->successful()) {
-            $order->update(['review_sent' => true]);
-        } else {
-            Log::error("SendReviewRequest: failed to send to {$order->phone}", [
-                'status'   => $response->status(),
-                'response' => $response->body(),
-            ]);
+            if ($response->successful()) {
+                $order->update(['review_sent' => true]);
+            } else {
+                Log::warning('Review request failed', ['order' => $order->id, 'response' => $response->body()]);
+            }
+        } catch (\Throwable $e) {
+            Log::error('Review request exception', ['order' => $order->id, 'error' => $e->getMessage()]);
         }
     }
 }

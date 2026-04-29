@@ -52,4 +52,9 @@ return [
         'admin_phone'  => env('ADMIN_WHATSAPP'),
     ],
 
+    'savanna_bites' => [
+        'shop_lat' => env('SHOP_LAT', -17.830737),
+        'shop_lng' => env('SHOP_LNG',  31.049078),
+    ],
+
 ];

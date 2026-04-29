@@ -12,6 +12,9 @@ use Illuminate\Support\Facades\Log;
 
 class OrderController extends Controller
 {
+    private const DIV  = "──────────────────────";
+    private const DIV2 = "━━━━━━━━━━━━━━━━━";
+
     // ─────────────────────────────────────────
     //  GET ALL ORDERS
     // ─────────────────────────────────────────
@@ -102,10 +105,11 @@ class OrderController extends Controller
         $order = Order::findOrFail($id);
 
         $oldStatus        = $order->status;
-        $newStatus        = $request->input('status');
         $oldPaymentStatus = $order->payment_status;
-        $newPaymentStatus = $request->input('payment_status');
         $oldAssignedTo    = $order->assigned_to;
+
+        $newStatus        = $request->input('status');
+        $newPaymentStatus = $request->input('payment_status');
 
         $updates = [];
 
@@ -113,9 +117,8 @@ class OrderController extends Controller
             $updates['status'] = $newStatus;
         }
 
-        // Track partial / instalment payment
         if ($request->has('amount_paid')) {
-            $newAmountPaid = max(0, (float) $request->amount_paid);
+            $newAmountPaid          = max(0, (float) $request->amount_paid);
             $updates['amount_paid'] = $newAmountPaid;
 
             if ((float) $newAmountPaid !== (float) $order->amount_paid) {
@@ -129,21 +132,22 @@ class OrderController extends Controller
             }
         }
 
-        // Assign a team member for delivery
         if ($request->has('assigned_to')) {
             $updates['assigned_to'] = $request->assigned_to ?: null;
         }
 
-        // Payment approval / rejection from dashboard
         if ($request->has('payment_status')) {
             $updates['payment_status'] = $newPaymentStatus;
+
+            if ($newPaymentStatus === 'paid' && $oldPaymentStatus !== 'paid') {
+                $updates['payment_confirmed_at'] = now();
+            }
         }
 
-        // Save first so notifications use fresh values
         $order->update($updates);
         $order->refresh()->loadMissing('assignedMember:id,name,role');
 
-        // ── Log changes ──
+        // ── Activity log ──────────────────────────
         if ($request->has('status') && $oldStatus !== $newStatus) {
             OrderActivity::create([
                 'order_id'   => $order->id,
@@ -175,51 +179,74 @@ class OrderController extends Controller
             ]);
         }
 
-        // ── Payment notifications + conversation updates ──
+        // ── POS orders — no notifications ──
+        if ($order->phone === 'POS') {
+            return response()->json($order->fresh()->load('assignedMember:id,name,role'));
+        }
+
+        $paymentStatusChanged = $request->has('payment_status') && $oldPaymentStatus !== $newPaymentStatus;
+        $statusChanged        = $request->has('status')         && $oldStatus        !== $newStatus;
+
+        // ── Cash: completed + paid in one action ──
+        // Both status and payment_status are sent together from the frontend
+        // "Delivered & Paid" / "Collected & Paid" button
         if (
-            $request->has('payment_status') &&
-            $oldPaymentStatus !== $newPaymentStatus &&
-            $order->phone !== 'POS'
+            $statusChanged && $newStatus === 'completed' &&
+            $paymentStatusChanged && $newPaymentStatus === 'paid' &&
+            $order->payment_method === 'cash'
         ) {
-            $convo = ConversationState::where('phone', $order->phone)->first();
+            // Single completion message — no duplicate
+            $this->notifyStatusChanged($order, 'completed');
 
-            if ($newPaymentStatus === 'paid') {
-                if ($convo) {
-                    $convo->update([
-                        'state'      => 'completed',
-                        'order_text' => (string) $order->id,
-                    ]);
-                }
-
-                $this->notifyCustomerPayment($order, 'approved');
+            if (!$order->review_sent) {
+                SendReviewRequest::dispatch($order->id)->delay(now()->addMinutes(2));
             }
 
-            if ($newPaymentStatus === 'failed') {
-                if ($convo) {
-                    $convo->update([
-                        'state'      => 'idle',
-                        'order_text' => null,
-                    ]);
-                }
+            $convo = ConversationState::where('phone', $order->phone)->first();
+            if ($convo) {
+                $convo->update([
+                    'state'      => 'completed',
+                    'order_text' => (string) $order->id,
+                ]);
+            }
 
-                $this->notifyCustomerPayment($order, 'rejected');
+            return response()->json($order->fresh()->load('assignedMember:id,name,role'));
+        }
+
+        // ── EcoCash: payment confirmed (happens before preparation) ──
+        if ($paymentStatusChanged && $newPaymentStatus === 'paid' && $order->payment_method === 'ecocash') {
+            $this->notifyPaymentConfirmed($order);
+
+            $convo = ConversationState::where('phone', $order->phone)->first();
+            if ($convo) {
+                $convo->update([
+                    'state'      => 'completed',
+                    'order_text' => (string) $order->id,
+                ]);
             }
         }
 
-        // ── Status notifications ──
-        if ($request->has('status') && $oldStatus !== $newStatus && $order->phone !== 'POS') {
-            $this->notifyCustomer($order, $newStatus);
+        // ── Payment rejected ──
+        if ($paymentStatusChanged && $newPaymentStatus === 'failed') {
+            $this->notifyPaymentRejected($order);
+
+            $convo = ConversationState::where('phone', $order->phone)->first();
+            if ($convo) {
+                $convo->update(['state' => 'idle', 'order_text' => null]);
+            }
+        }
+
+        // ── Status changed — all other status transitions ──
+        if ($statusChanged && !($paymentStatusChanged && $newPaymentStatus === 'paid')) {
+            $this->notifyStatusChanged($order, $newStatus);
 
             if ($newStatus === 'completed' && !$order->review_sent) {
                 SendReviewRequest::dispatch($order->id)->delay(now()->addMinutes(2));
             }
         }
 
-        return response()->json(
-            $order->fresh()->load('assignedMember:id,name,role')
-        );
+        return response()->json($order->fresh()->load('assignedMember:id,name,role'));
     }
-
     // ─────────────────────────────────────────
     //  ORDER ACTIVITY LOG
     // ─────────────────────────────────────────
@@ -227,11 +254,9 @@ class OrderController extends Controller
     {
         Order::findOrFail($id);
 
-        $activities = OrderActivity::where('order_id', $id)
-            ->orderByDesc('created_at')
-            ->get();
-
-        return response()->json($activities);
+        return response()->json(
+            OrderActivity::where('order_id', $id)->orderByDesc('created_at')->get()
+        );
     }
 
     // ─────────────────────────────────────────
@@ -239,99 +264,129 @@ class OrderController extends Controller
     // ─────────────────────────────────────────
     public function reviews()
     {
-        $reviews = Order::whereNotNull('rating')
-            ->orderByDesc('updated_at')
-            ->get([
-                'id',
-                'phone',
-                'order_text',
-                'total',
-                'rating',
-                'review',
-                'order_type',
-                'created_at',
-                'updated_at',
-            ]);
-
-        return response()->json($reviews);
-    }
-
-    // ─────────────────────────────────────────
-    //  PUBLIC INVOICE — no auth required
-    // ─────────────────────────────────────────
-    public function invoice($id)
-    {
-        $order = Order::findOrFail($id);
-
         return response()->json(
-            $order->only(['id', 'order_text', 'total', 'status', 'payment_status', 'created_at'])
+            Order::whereNotNull('rating')
+                ->orderByDesc('updated_at')
+                ->get(['id', 'phone', 'order_text', 'total', 'rating', 'review', 'order_type', 'created_at', 'updated_at'])
         );
     }
 
     // ─────────────────────────────────────────
-    //  PAYMENT APPROVED / REJECTED NOTIFICATION
+    //  PUBLIC INVOICE
     // ─────────────────────────────────────────
-    private function notifyCustomerPayment(Order $order, string $action): void
+    public function invoice($id)
     {
-        $message = match ($action) {
-            'approved' => $order->payment_method === 'cash'
-                ? "✅ *Payment Confirmed!*\n\n"
-                    . "We've received your cash payment for Order #{$order->id}.\n"
-                    . "Our team is now preparing your order! 🍽️\n\n"
-                    . "You'll receive an update when it's ready."
-                : "✅ *Payment Confirmed!*\n\n"
-                    . "We've received your EcoCash payment for Order #{$order->id}.\n"
-                    . "Our team is now preparing your order! 🍽️\n\n"
-                    . "You'll receive an update when it's ready.",
+        return response()->json(
+            Order::findOrFail($id)
+                ->only(['id', 'order_text', 'total', 'status', 'payment_status', 'created_at'])
+        );
+    }
 
-            'rejected' => $order->payment_method === 'cash'
-                ? "❌ *Payment Not Verified*\n\n"
-                    . "We could not confirm the cash payment for Order #{$order->id}.\n\n"
-                    . "Please contact us for help."
-                : "❌ *Payment Not Verified*\n\n"
-                    . "We could not verify your EcoCash payment for Order #{$order->id}.\n\n"
-                    . "Please ensure you sent *\${$order->total}* correctly, then contact us for help.",
+    // ═════════════════════════════════════════
+    //  NOTIFICATION METHODS
+    // ═════════════════════════════════════════
 
-            default => null,
-        };
+    // ─────────────────────────────────────────
+    //  1. PAYMENT CONFIRMED (cash or ecocash)
+    // ─────────────────────────────────────────
+    private function notifyPaymentConfirmed(Order $order): void
+    {
+        $orderNum = 'SB' . str_pad($order->id, 5, '0', STR_PAD_LEFT);
+        $isPickup = $order->order_type === 'pickup';
+        $etaLine  = $isPickup
+            ? "📍 Pickup ready in *20–30 mins*"
+            : "🚗 Delivery ETA *30–45 mins*";
 
-        if (!$message) {
-            return;
-        }
+        $message =
+            "✅ *Payment Confirmed!*\n\n"
+            . "🔖 Order *#{$orderNum}*\n"
+            . self::DIV2 . "\n"
+            . "💰 *\${$order->total}* — 📱 EcoCash ✅\n"
+            . self::DIV2 . "\n\n"
+            . "👨‍🍳 Our team is now preparing your order!\n\n"
+            . "{$etaLine}\n\n"
+            . "_We'll send you an update as soon as it's "
+            . ($isPickup ? "ready for collection" : "on its way") . "._";
 
-        $this->sendWhatsappMessage($order->phone, $message, 'Payment notify failed', $order->id);
+        $this->sendWhatsappMessage($order->phone, $message, 'Payment confirmed notify failed', $order->id);
     }
 
     // ─────────────────────────────────────────
-    //  WHATSAPP STATUS NOTIFICATION
+    //  2. PAYMENT REJECTED
     // ─────────────────────────────────────────
-    private function notifyCustomer(Order $order, string $status): void
+    private function notifyPaymentRejected(Order $order): void
     {
+        $orderNum  = 'SB' . str_pad($order->id, 5, '0', STR_PAD_LEFT);
+        $isEcocash = $order->payment_method === 'ecocash';
+
+        $message =
+            "❌ *Payment Not Verified*\n\n"
+            . "🔖 Order *#{$orderNum}*\n"
+            . self::DIV2 . "\n"
+            . ($isEcocash
+                ? "We could not verify your EcoCash payment of *\${$order->total}*.\n\n"
+                . "Please ensure the payment was sent correctly."
+                : "We could not confirm your cash payment for this order.")
+            . "\n\n"
+            . "📞 Please contact us: *+263 77 247 6989*\n"
+            . self::DIV2 . "\n\n"
+            . "_Reply *hi* to start a new order._";
+
+        $this->sendWhatsappMessage($order->phone, $message, 'Payment rejected notify failed', $order->id);
+    }
+
+    // ─────────────────────────────────────────
+    //  3. ORDER STATUS CHANGED
+    // ─────────────────────────────────────────
+    private function notifyStatusChanged(Order $order, string $status): void
+    {
+        $orderNum = 'SB' . str_pad($order->id, 5, '0', STR_PAD_LEFT);
         $isPickup = $order->order_type === 'pickup';
 
-        if ($status === 'out_for_delivery' && $isPickup) {
-            return;
-        }
+        // out_for_delivery never fires for pickup
+        if ($status === 'out_for_delivery' && $isPickup) return;
+
+        // ready only fires for pickup
+        if ($status === 'ready' && !$isPickup) return;
 
         $message = match ($status) {
-            'preparing' => "*Your order is being prepared!*\n\nWe've started cooking your food. Won't be long now!",
 
-            'ready' => $isPickup
-                ? "*Your order is ready for collection!* 🏃\n\nCome grab your food whenever you're ready. We're waiting for you!"
-                : "*Your order is ready and being dispatched!* 🚗\n\nYour delivery is on its way. ETA 10–20 mins.",
+            'preparing' =>
+            "👨‍🍳 *Your order is being prepared!*\n\n"
+                . "🔖 Order *#{$orderNum}*\n"
+                . self::DIV2 . "\n"
+                . "We've started cooking your food — won't be long!\n\n"
+                . ($isPickup
+                    ? "📍 Ready for pickup in *20–30 mins*."
+                    : "🚗 We'll dispatch it to you shortly."),
 
-            'out_for_delivery' => "*Your order is on its way!*\n\nYour delivery is heading to you now. ETA 10–20 mins.",
+            'ready' =>
+            "✅ *Your order is ready for pickup!*\n\n"
+                . "🔖 Order *#{$orderNum}*\n"
+                . self::DIV2 . "\n"
+                . "📍 Come collect whenever you're ready — we're waiting!\n\n"
+                . "💵 *Please bring your cash payment of \${$order->total}.*",
 
-            'completed' => "*Order completed!*\n\nThank you for choosing *" . env('RESTAURANT_NAME', 'My Restaurant') . "!*\n\nEnjoy your meal! Reply *hi* to order again.",
+            'out_for_delivery' =>
+            "🛵 *Your order is on its way!*\n\n"
+                . "🔖 Order *#{$orderNum}*\n"
+                . self::DIV2 . "\n"
+                . "🚗 Our driver is heading to you now. ETA *10–20 mins*.\n\n"
+                . "💵 *Please have \${$order->total} cash ready at the door.*",
+
+            'completed' =>
+            "🙏 *Thank you for choosing Savanna Bites!*\n\n"
+                . "🔖 Order *#{$orderNum}* — ✅ Complete\n"
+                . self::DIV2 . "\n"
+                . "We hope you loved your meal!\n\n"
+                . "_Reply *hi* anytime to order again._ 🔥",
 
             default => null,
         };
 
-        if (!$message) {
-            return;
-        }
+        if (!$message) return;
 
-        $this->sendWhatsappMessage($order->phone, $message, 'WhatsApp notify failed', $order->id);
+        $this->sendWhatsappMessage($order->phone, $message, 'Status notify failed', $order->id);
     }
 
     // ─────────────────────────────────────────
@@ -343,7 +398,7 @@ class OrderController extends Controller
         $phoneId = config('services.whatsapp.phone_id');
 
         if (!$token || !$phoneId) {
-            Log::warning('WhatsApp notify skipped: missing config credentials', [
+            Log::warning('WhatsApp notify skipped: missing config', [
                 'order_id' => $orderId,
                 'to'       => $to,
             ]);
@@ -353,18 +408,15 @@ class OrderController extends Controller
         try {
             $response = Http::withToken($token)
                 ->timeout(8)
-                ->post(
-                    "https://graph.facebook.com/v19.0/{$phoneId}/messages",
-                    [
-                        'messaging_product' => 'whatsapp',
-                        'to'                => $to,
-                        'type'              => 'text',
-                        'text'              => [
-                            'body'        => $message,
-                            'preview_url' => false,
-                        ],
-                    ]
-                );
+                ->post("https://graph.facebook.com/v19.0/{$phoneId}/messages", [
+                    'messaging_product' => 'whatsapp',
+                    'to'                => $to,
+                    'type'              => 'text',
+                    'text'              => [
+                        'body'        => $message,
+                        'preview_url' => false,
+                    ],
+                ]);
 
             if (!$response->successful()) {
                 Log::error($logContext, [

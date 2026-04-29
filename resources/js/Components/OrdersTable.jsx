@@ -56,6 +56,14 @@ function chrome(t) {
 }
 
 /* ─────────────────────────────────────────────────────────────
+   TEXT HELPERS
+───────────────────────────────────────────────────────────── */
+function humanize(text) {
+  if (text == null) return text
+  return String(text).replace(/_/g, ' ')
+}
+
+/* ─────────────────────────────────────────────────────────────
    STATUS BADGE
 ───────────────────────────────────────────────────────────── */
 function StatusBadge({ status }) {
@@ -284,7 +292,7 @@ function OrderPanel({ order, updateStatus, confirmPayment, onClose, t }) {
           {/* Order info */}
           <SectionLabel c={c}>Order Info</SectionLabel>
           <PanelRow c={c} label="Customer" value={`+${order.phone}`}                                                                           mono />
-          <PanelRow c={c} label="Items"    value={order.order_text} />
+          <PanelRow c={c} label="Items"    value={humanize(order.order_text)} />
           <PanelRow c={c} label="Total"    value={`$${Number(order.total).toFixed(2)}`}                                                        mono highlight />
           <PanelRow c={c} label="Type"     value={order.order_type === 'pickup' ? '🏃 Pickup' : '🚗 Delivery'} />
           <PanelRow c={c} label="Method"   value={order.payment_method ?? '—'}                                                                 mono />
@@ -486,7 +494,7 @@ export default function OrdersTable({ orders, filter, setFilter, updateStatus, c
                   </td>
 
                   <td style={{ padding: '13px 16px', fontFamily: 'Manrope,sans-serif', fontSize: 12, color: c.text, maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {order.order_text}
+                    {humanize(order.order_text)}
                   </td>
 
                   <td style={{ padding: '13px 16px', fontFamily: 'JetBrains Mono,monospace', fontSize: 13, fontWeight: 600, color: '#4ade80', letterSpacing: '-0.01em', whiteSpace: 'nowrap' }}>

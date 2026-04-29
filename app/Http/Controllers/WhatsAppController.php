@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\ConversationState;
 use App\Models\MenuItem;
 use App\Models\Order;
+use App\Services\DeliveryFeeService;
 use App\Services\PaynowService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
@@ -15,14 +16,13 @@ class WhatsAppController extends Controller
     private ?array $menu    = null;
     private ?array $itemMap = null;
 
-    // ─────────────────────────────────────────
-    //  CONSTANTS
-    // ─────────────────────────────────────────
     private const DIV  = "──────────────────────";
     private const DIV2 = "━━━━━━━━━━━━━━━━━";
 
     private const PAYNOW_POLL_TIMEOUT  = 90;
     private const PAYNOW_POLL_INTERVAL = 6;
+
+    public function __construct(private DeliveryFeeService $deliveryFeeService) {}
 
     // ══════════════════════════════════════════
     //  MENU LOADER
@@ -95,7 +95,6 @@ class WhatsAppController extends Controller
         $phone = $msg['from'];
         $type  = $msg['type'] ?? 'text';
 
-        // Lowercased — used for button IDs and keyword matching
         $text = match ($type) {
             'text'        => strtolower(trim($msg['text']['body'] ?? '')),
             'interactive' => strtolower(trim(
@@ -106,7 +105,6 @@ class WhatsAppController extends Controller
             default => '',
         };
 
-        // Raw (preserves digits/capitalisation) — used for phone number capture
         $rawText = match ($type) {
             'text'        => trim($msg['text']['body'] ?? ''),
             'interactive' => trim(
@@ -123,8 +121,20 @@ class WhatsAppController extends Controller
         );
 
         // ── Always allow restart ──
+        // In handle(), reorder the interceptors like this:
+
+        // ── Always allow restart ──
         if ($this->isGreeting($text)) {
             return $this->sendWelcome($phone, $convo);
+        }
+
+        // ── Location message ──
+        if ($type === 'location') {
+            $lat = $msg['location']['latitude']  ?? null;
+            $lng = $msg['location']['longitude'] ?? null;
+            if ($lat !== null && $lng !== null && $convo->state === 'awaiting_location') {
+                return $this->handleLocation($phone, (float) $lat, (float) $lng, $convo);
+            }
         }
 
         // ── Review replies ──
@@ -132,15 +142,10 @@ class WhatsAppController extends Controller
             return $this->handleReview($phone, $m[1], (int) $m[2], $convo);
         }
 
-        // ── EcoCash number capture — intercept before any global routing ──
+        // ── EcoCash states — must be before global interceptors ──
         if ($convo->state === 'awaiting_ecocash_number') {
             return $this->handleEcocashNumber($phone, $rawText, $convo);
         }
-
-        // ── Awaiting EcoCash payment (USSD sent, polling in background) ──
-        // The user may tap "Switch to Cash" during polling, or send random text.
-        // This must be caught BEFORE global interceptors so pay_cash/pay_ecocash
-        // don't hit handlePaymentChoice() with a stale/empty convo state.
         if ($convo->state === 'awaiting_ecocash_payment') {
             return $this->handleAwaitingEcocashPayment($phone, $text, $convo);
         }
@@ -165,6 +170,34 @@ class WhatsAppController extends Controller
         if ($text === 'checkout') {
             return $this->handleCartAction($phone, $text, $convo);
         }
+
+        // ── Cart controls — work from any state ──
+        if ($text === 'add_more') {
+            $convo->update(['state' => 'ordering']);
+            return $this->sendBrowseMenu($phone);
+        }
+        if ($text === 'clear_start') {
+            $convo->update(['state' => 'idle', 'cart' => '[]', 'order_text' => null]);
+
+            return $this->sendButtons(
+                $phone,
+                "👋 *Order Cancelled*\n\n"
+                    . self::DIV . "\n"
+                    . "No worries — we hope to serve you soon!\n\n"
+                    . "😔 Sorry we couldn't deliver to your area just yet.\n"
+                    . "We're always expanding our delivery zones — check back soon!\n\n"
+                    . self::DIV . "\n"
+                    . "📍 *Visit us anytime at:*\n"
+                    . "Jason Moyo Ave, Harare\n"
+                    . "🕐 Mon–Sat  8am – 9pm",
+                "Savanna Bites Express  🍽️",
+                [
+                    ['id' => 'place_order', 'title' => '🛒 Order for Pickup'],
+                ]
+            );
+        }
+
+        // ── Delivery / payment — work from any state ──
         if (in_array($text, ['pickup', 'delivery'])) {
             return $this->handleDeliveryChoice($phone, $text, $convo);
         }
@@ -179,6 +212,11 @@ class WhatsAppController extends Controller
         }
         if (isset($this->getItemMap()[$text])) {
             return $this->handleOrdering($phone, $text, $convo);
+        }
+
+        // ── Awaiting location — text that isn't a button we handle above ──
+        if ($convo->state === 'awaiting_location') {
+            return $this->sendLocationReminder($phone);
         }
 
         // ── State machine ──
@@ -198,50 +236,75 @@ class WhatsAppController extends Controller
     }
 
     // ══════════════════════════════════════════
+    //  ORDER META PARSER
+    //  order_text format:
+    //    pickup
+    //    delivery|{fee}|{lat}|{lng}
+    //    ecocash_pickup
+    //    ecocash_delivery|{fee}|{lat}|{lng}
+    // ══════════════════════════════════════════
+    private function parseOrderMeta(?string $orderText): array
+    {
+        if (!$orderText) {
+            return ['is_pickup' => true, 'delivery' => 0.0, 'lat' => null, 'lng' => null];
+        }
+
+        if (in_array($orderText, ['pickup', 'ecocash_pickup'])) {
+            return ['is_pickup' => true, 'delivery' => 0.0, 'lat' => null, 'lng' => null];
+        }
+
+        if (
+            str_starts_with($orderText, 'delivery')
+            || str_starts_with($orderText, 'ecocash_delivery')
+        ) {
+            $parts = explode('|', $orderText);
+            return [
+                'is_pickup' => false,
+                'delivery'  => isset($parts[1]) ? (float) $parts[1] : 0.0,
+                'lat'       => isset($parts[2]) ? (float) $parts[2] : null,
+                'lng'       => isset($parts[3]) ? (float) $parts[3] : null,
+            ];
+        }
+
+        return ['is_pickup' => true, 'delivery' => 0.0, 'lat' => null, 'lng' => null];
+    }
+
+    // ══════════════════════════════════════════
     //  AWAITING ECOCASH PAYMENT
-    //  Handles any message received while the Paynow poll is running
-    //  in the background. order_text holds the Order ID at this point.
     // ══════════════════════════════════════════
     private function handleAwaitingEcocashPayment(string $phone, string $text, ConversationState $convo)
     {
-        // Load the pending order so we can recover delivery type and cart
         $order = $convo->order_text
-            ? Order::find((int) $convo->order_text, ['id', 'status', 'total', 'order_text', 'payment_status'])
+            ? Order::find((int) $convo->order_text, ['id', 'status', 'order_type', 'total', 'order_text', 'payment_status'])
             : null;
 
-        // If somehow already paid (race condition), just show confirmation menu
         if ($order && $order->payment_status === 'paid') {
             $convo->update(['state' => 'completed']);
             return $this->sendCompletedMenu($phone);
         }
 
-        // User tapped "Switch to Cash" — abort the EcoCash attempt
         if ($text === 'pay_cash') {
             if ($order) {
-                // Mark the pending EcoCash order as abandoned
                 $order->update(['payment_status' => 'failed']);
 
-                // Rebuild cart from the order_text ("1 burger 2 chips" format)
                 $cart     = $this->rebuildCartFromOrderText($order->order_text);
-                $isPickup = $order->status === 'pickup';
+                $isPickup = $order->order_type === 'pickup';
+                $delivery = $isPickup ? 0.0 : round($order->total - $this->cartTotal($cart), 2);
 
-                // Restore conversation to payment_choice with cart intact
                 $convo->update([
                     'state'      => 'awaiting_cash_amount',
                     'cart'       => json_encode($cart),
-                    'order_text' => $isPickup ? 'pickup' : 'delivery',
+                    'order_text' => $isPickup ? 'pickup' : "delivery|{$delivery}",
                 ]);
 
-                $total = round($this->cartTotal($cart) + ($isPickup ? 0.0 : 1.50), 2);
-                return $this->sendCashAmountPicker($phone, $total, $isPickup);
+                $total = round($this->cartTotal($cart) + $delivery, 2);
+                return $this->sendCashAmountPicker($phone, $convo, $total, $isPickup);
             }
 
-            // Fallback if order is missing — restart cleanly
             $convo->update(['state' => 'idle', 'cart' => '[]', 'order_text' => null]);
             return $this->sendWelcome($phone, $convo);
         }
 
-        // User tapped "Retry EcoCash" or sent anything else — remind them to wait
         $orderNum = $order ? 'SB' . str_pad($order->id, 5, '0', STR_PAD_LEFT) : '—';
         $total    = $order?->total ?? '?';
 
@@ -268,7 +331,6 @@ class WhatsAppController extends Controller
     {
         $convo->update(['state' => 'main_menu', 'cart' => '[]', 'order_text' => null]);
 
-        /** @var Order|null $lastOrder */
         $lastOrder = Order::where('phone', $phone)
             ->where('phone', '!=', 'POS')
             ->latest('id')
@@ -639,7 +701,7 @@ class WhatsAppController extends Controller
                 "Choose delivery method",
                 [
                     ['id' => 'pickup',   'title' => '🏃 Pickup'],
-                    ['id' => 'delivery', 'title' => '🚗 Delivery (+$1.50)'],
+                    ['id' => 'delivery', 'title' => '🚗 Delivery'],
                 ]
             );
         }
@@ -648,7 +710,7 @@ class WhatsAppController extends Controller
     }
 
     // ══════════════════════════════════════════
-    //  DELIVERY CHOICE → PAYMENT METHOD
+    //  DELIVERY CHOICE
     // ══════════════════════════════════════════
     private function handleDeliveryChoice(string $phone, string $text, ConversationState $convo)
     {
@@ -659,7 +721,7 @@ class WhatsAppController extends Controller
                 "Choose delivery method",
                 [
                     ['id' => 'pickup',   'title' => '🏃 Pickup'],
-                    ['id' => 'delivery', 'title' => '🚗 Delivery (+$1.50)'],
+                    ['id' => 'delivery', 'title' => '🚗 Delivery'],
                 ]
             );
         }
@@ -672,31 +734,169 @@ class WhatsAppController extends Controller
             return $this->sendWelcome($phone, $convo);
         }
 
-        $isPickup     = $text === 'pickup';
-        $delivery     = $isPickup ? 0.0 : 1.50;
-        $subtotal     = $this->cartTotal($cart);
-        $total        = round($subtotal + $delivery, 2);
-        $summary      = $this->cartSummaryFull($cart);
-        $deliveryLine = !$isPickup ? "\n🚗 Delivery:  \$" . number_format($delivery, 2) : '';
-        $typeLabel    = $isPickup ? '🏃 Pickup' : '🚗 Delivery';
-        $cashLabel    = $isPickup ? '💵 Cash on Pickup' : '💵 Cash on Delivery';
+        if ($text === 'pickup') {
+            $subtotal = $this->cartTotal($cart);
+            $summary  = $this->cartSummaryFull($cart);
 
-        $convo->update(['state' => 'payment_choice', 'order_text' => $isPickup ? 'pickup' : 'delivery']);
+            $convo->update(['state' => 'payment_choice', 'order_text' => 'pickup']);
+
+            return $this->sendButtons(
+                $phone,
+                "💳 *How would you like to pay?*\n\n"
+                    . "{$summary}\n"
+                    . self::DIV2 . "\n"
+                    . "🛍️ Subtotal:  \${$subtotal}\n"
+                    . "💵 *Total:    \${$subtotal}*\n"
+                    . self::DIV2 . "\n"
+                    . "📦 🏃 Pickup",
+                "Select your payment method",
+                [
+                    ['id' => 'pay_cash',    'title' => '💵 Cash on Pickup'],
+                    ['id' => 'pay_ecocash', 'title' => '📱 EcoCash (Paynow)'],
+                ]
+            );
+        }
+
+        // Delivery — ask for location
+        $convo->update(['state' => 'awaiting_location', 'order_text' => 'delivery|0']);
+
+        return $this->sendText(
+            $phone,
+            "📍 *Share Your Location*\n\n"
+                . self::DIV . "\n"
+                . "To calculate your delivery fee, please share your location:\n\n"
+                . "  1️⃣  Tap the 📎 *attachment* icon\n"
+                . "  2️⃣  Select *Location*\n"
+                . "  3️⃣  Tap *Send Your Current Location*\n\n"
+                . self::DIV . "\n"
+                . "_Make sure you're at your delivery address when sharing._"
+        );
+    }
+
+    // ══════════════════════════════════════════
+    //  LOCATION RECEIVED → calculate fee
+    // ══════════════════════════════════════════
+    private function handleLocation(string $phone, float $lat, float $lng, ConversationState $convo)
+    {
+        $convo->refresh();
+        $cart = $this->getCart($convo);
+
+        if (empty($cart)) {
+            $convo->update(['state' => 'idle']);
+            return $this->sendWelcome($phone, $convo);
+        }
+
+        $mealCount = (int) array_sum($cart);
+        $result    = $this->deliveryFeeService->calculate($lat, $lng, $mealCount);
+        $subtotal  = $this->cartTotal($cart);
+        $summary   = $this->cartSummaryFull($cart);
+
+        // ── Out of range ──
+        // Out of range — one decision, no second screen
+        if (!$result['eligible'] && $result['reason'] === 'out_of_range') {
+            $convo->update(['state' => 'ordering']);
+
+            $summary  = $this->cartSummaryFull($cart);
+            $subtotal = $this->cartTotal($cart);
+
+            return $this->sendButtons(
+                $phone,
+                "❌ *Outside Delivery Range*\n\n"
+                    . self::DIV . "\n"
+                    . "Sorry, we only deliver within *5km* of our shop.\n"
+                    . "📍 Your distance: *{$result['distance_km']}km* away\n\n"
+                    . self::DIV . "\n"
+                    . "🛒 *Your cart:*\n\n"
+                    . "{$summary}\n\n"
+                    . self::DIV . "\n"
+                    . "💵 *Subtotal: \${$subtotal}*\n\n"
+                    . "💡 Switch to pickup and we'll have it ready in *20–30 mins*\n"
+                    . "📍 *Jason Moyo Ave, Harare*",
+                "Savanna Bites Express  🍽️",
+                [
+                    ['id' => 'pickup',      'title' => '🏃 Switch to Pickup'],
+                    ['id' => 'clear_start', 'title' => '❌ Cancel Order'],
+                ]
+            );
+        }
+
+        // ── Minimum meals not met ──
+        if (!$result['eligible'] && $result['reason'] === 'min_meals') {
+            $convo->update(['state' => 'ordering']);
+
+            $fee        = number_format($result['fee'], 2);
+            $minMeals   = $result['min_meals'];
+            $mealsShort = $result['meals_short'];
+            $mealWord   = $mealsShort === 1 ? 'meal' : 'meals';
+
+            return $this->sendButtons(
+                $phone,
+                "⚠️ *Minimum Order Required*\n\n"
+                    . self::DIV . "\n"
+                    . "📍 Your distance: *{$result['distance_km']}km*\n"
+                    . "🚗 Delivery fee: *\${$fee}*\n\n"
+                    . "This zone requires a minimum of *{$minMeals} meals*.\n\n"
+                    . "You have *{$mealCount} " . ($mealCount === 1 ? 'meal' : 'meals') . "* — "
+                    . "please add *{$mealsShort} more {$mealWord}* to qualify.\n\n"
+                    . self::DIV . "\n"
+                    . "Or switch to pickup — no minimum required!",
+                "What would you like to do?",
+                [
+                    ['id' => 'add_more', 'title' => '➕ Add More Items'],
+                    ['id' => 'pickup',   'title' => '🏃 Switch to Pickup'],
+                ]
+            );
+        }
+
+        // ── Eligible ──
+        $delivery = $result['fee'];
+        $total    = round($subtotal + $delivery, 2);
+        $feeLine  = $delivery > 0
+            ? "🚗 Delivery:  \$" . number_format($delivery, 2)
+            : "🚗 Delivery:  *FREE* ✅";
+
+        $convo->update([
+            'state'      => 'payment_choice',
+            'order_text' => "delivery|{$delivery}|{$lat}|{$lng}",
+        ]);
 
         return $this->sendButtons(
             $phone,
-            "💳 *How would you like to pay?*\n\n"
+            "✅ *Delivery Available!*\n\n"
                 . "{$summary}\n"
                 . self::DIV2 . "\n"
-                . "🛍️ Subtotal:  \${$subtotal}"
-                . $deliveryLine . "\n"
+                . "🛍️ Subtotal:  \${$subtotal}\n"
+                . "{$feeLine}\n"
                 . "💵 *Total:    \${$total}*\n"
                 . self::DIV2 . "\n"
-                . "📦 {$typeLabel}",
+                . "📍 Distance: *{$result['distance_km']}km* from our shop\n\n"
+                . "💳 *How would you like to pay?*",
             "Select your payment method",
             [
-                ['id' => 'pay_cash',    'title' => mb_substr($cashLabel, 0, 20)],
+                ['id' => 'pay_cash',    'title' => '💵 Cash on Delivery'],
                 ['id' => 'pay_ecocash', 'title' => '📱 EcoCash (Paynow)'],
+            ]
+        );
+    }
+
+    // ══════════════════════════════════════════
+    //  LOCATION REMINDER
+    // ══════════════════════════════════════════
+    private function sendLocationReminder(string $phone): mixed
+    {
+        return $this->sendButtons(
+            $phone,
+            "📍 *We still need your location.*\n\n"
+                . self::DIV . "\n"
+                . "To share your location:\n\n"
+                . "  1️⃣  Tap the 📎 *attachment* icon\n"
+                . "  2️⃣  Select *Location*\n"
+                . "  3️⃣  Tap *Send Your Current Location*\n\n"
+                . self::DIV . "\n"
+                . "_Or switch to pickup — no location needed!_",
+            "Savanna Bites Express",
+            [
+                ['id' => 'pickup', 'title' => '🏃 Switch to Pickup'],
             ]
         );
     }
@@ -707,9 +907,9 @@ class WhatsAppController extends Controller
     private function handlePaymentChoice(string $phone, string $text, ConversationState $convo)
     {
         if (!in_array($text, ['pay_cash', 'pay_ecocash'])) {
-            $cart     = $this->getCart($convo);
-            $isPickup = $convo->order_text === 'pickup';
-            $total    = round($this->cartTotal($cart) + ($isPickup ? 0 : 1.50), 2);
+            $cart  = $this->getCart($convo);
+            $meta  = $this->parseOrderMeta($convo->order_text);
+            $total = round($this->cartTotal($cart) + $meta['delivery'], 2);
 
             return $this->sendButtons(
                 $phone,
@@ -730,14 +930,19 @@ class WhatsAppController extends Controller
             return $this->sendWelcome($phone, $convo);
         }
 
-        $isPickup = $convo->order_text === 'pickup';
-        $delivery = $isPickup ? 0.0 : 1.50;
+        $meta     = $this->parseOrderMeta($convo->order_text);
+        $isPickup = $meta['is_pickup'];
+        $delivery = $meta['delivery'];
         $total    = round($this->cartTotal($cart) + $delivery, 2);
 
         if ($text === 'pay_ecocash') {
+            $ecocashMeta = $isPickup
+                ? 'ecocash_pickup'
+                : "ecocash_delivery|{$delivery}|{$meta['lat']}|{$meta['lng']}";
+
             $convo->update([
                 'state'      => 'awaiting_ecocash_number',
-                'order_text' => 'ecocash_' . ($isPickup ? 'pickup' : 'delivery'),
+                'order_text' => $ecocashMeta,
             ]);
 
             return $this->sendButtons(
@@ -761,7 +966,7 @@ class WhatsAppController extends Controller
 
         // Cash path
         $convo->update(['state' => 'awaiting_cash_amount']);
-        return $this->sendCashAmountPicker($phone, $total, $isPickup);
+        return $this->sendCashAmountPicker($phone, $convo, $total, $isPickup);
     }
 
     // ══════════════════════════════════════════
@@ -777,14 +982,19 @@ class WhatsAppController extends Controller
             return $this->sendWelcome($phone, $convo);
         }
 
-        $isPickup = str_ends_with((string) $convo->order_text, 'pickup');
-        $delivery = $isPickup ? 0.0 : 1.50;
+        $meta     = $this->parseOrderMeta($convo->order_text);
+        $isPickup = $meta['is_pickup'];
+        $delivery = $meta['delivery'];
         $total    = round($this->cartTotal($cart) + $delivery, 2);
 
-        // Handle "Switch to Cash" button tapped from the EcoCash number prompt
+        // Handle "Switch to Cash" tapped from EcoCash number prompt
         if (strtolower($rawText) === 'pay_cash') {
-            $convo->update(['state' => 'awaiting_cash_amount', 'order_text' => $isPickup ? 'pickup' : 'delivery']);
-            return $this->sendCashAmountPicker($phone, $total, $isPickup);
+            $orderText = $isPickup
+                ? 'pickup'
+                : "delivery|{$delivery}|{$meta['lat']}|{$meta['lng']}";
+
+            $convo->update(['state' => 'awaiting_cash_amount', 'order_text' => $orderText]);
+            return $this->sendCashAmountPicker($phone, $convo, $total, $isPickup);
         }
 
         // ── Number validation ──
@@ -792,9 +1002,8 @@ class WhatsAppController extends Controller
         if (str_starts_with($digits, '263') && strlen($digits) === 12) {
             $digits = '0' . substr($digits, 3);
         }
-        $validFormat = (bool) preg_match('/^07[1-9]\d{7}$/', $digits);
 
-        if (!$validFormat) {
+        if (!preg_match('/^07[1-9]\d{7}$/', $digits)) {
             return $this->sendButtons(
                 $phone,
                 "❌ *Invalid EcoCash Number*\n\n"
@@ -825,7 +1034,7 @@ class WhatsAppController extends Controller
             'phone'          => $phone,
             'order_text'     => $orderText,
             'total'          => $total,
-            'status'         => $isPickup ? 'pickup' : 'delivery',
+            'status'         => 'pending',
             'order_type'     => $isPickup ? 'pickup' : 'delivery',
             'payment_method' => 'ecocash',
             'payment_status' => 'pending',
@@ -833,7 +1042,6 @@ class WhatsAppController extends Controller
 
         $orderNum = 'SB' . str_pad($order->id, 5, '0', STR_PAD_LEFT);
 
-        // Lock conversation — order_text now holds the Order ID
         $convo->update([
             'state'      => 'awaiting_ecocash_payment',
             'cart'       => '[]',
@@ -853,11 +1061,15 @@ class WhatsAppController extends Controller
 
         if (!$result['success']) {
             $order->update(['payment_status' => 'failed']);
-            // Restore cart and delivery type so they can retry cleanly
+
+            $orderText = $isPickup
+                ? 'pickup'
+                : "delivery|{$delivery}|{$meta['lat']}|{$meta['lng']}";
+
             $convo->update([
                 'state'      => 'payment_choice',
                 'cart'       => json_encode($cart),
-                'order_text' => $isPickup ? 'pickup' : 'delivery',
+                'order_text' => $orderText,
             ]);
 
             return $this->sendButtons(
@@ -883,17 +1095,29 @@ class WhatsAppController extends Controller
         $pollUrl   = $result['pollUrl'];
         $reference = $result['reference'] ?? $orderNum;
 
+        $controller     = $this;
         $notifyOrder    = $order;
         $notifyIsPickup = $isPickup;
         $notifyCart     = $cart;
         $notifyPhone    = $phone;
-        $controller     = $this;
+        $notifyDelivery = $delivery;
 
         dispatch(static function () use (
-            $controller, $notifyOrder, $notifyIsPickup, $notifyCart, $pollUrl, $notifyPhone
+            $controller,
+            $notifyOrder,
+            $notifyIsPickup,
+            $notifyCart,
+            $pollUrl,
+            $notifyPhone,
+            $notifyDelivery
         ) {
             $controller->pollAndFinalise(
-                $notifyOrder, $notifyIsPickup, $notifyCart, $pollUrl, $notifyPhone
+                $notifyOrder,
+                $notifyIsPickup,
+                $notifyCart,
+                $pollUrl,
+                $notifyPhone,
+                $notifyDelivery
             );
         })->afterResponse();
 
@@ -917,14 +1141,15 @@ class WhatsAppController extends Controller
     }
 
     // ══════════════════════════════════════════
-    //  PAYNOW POLL LOOP — runs after HTTP response is sent
+    //  PAYNOW POLL LOOP — runs after HTTP response
     // ══════════════════════════════════════════
     public function pollAndFinalise(
         Order $order,
         bool $isPickup,
         array $cart,
         string $pollUrl,
-        string $phone
+        string $phone,
+        float $delivery = 0.0
     ): void {
         $paynow  = new PaynowService();
         $elapsed = 0;
@@ -959,33 +1184,30 @@ class WhatsAppController extends Controller
             }
         }
 
-        // Re-check if user already switched to cash mid-poll (payment_status = 'failed'
-        // set by handleAwaitingEcocashPayment). Don't overwrite or re-notify in that case.
         $order->refresh();
+
+        // User already switched to cash mid-poll — do nothing
         if ($order->payment_status === 'failed' && !$paid) {
-            // User already handled this via "Switch to Cash" — do nothing
             return;
         }
 
         if ($paid) {
             $order->update(['payment_status' => 'paid']);
-            $this->sendEcocashConfirmation($phone, $order, $isPickup, $cart);
-            $this->notifyAdmin($order, $isPickup, $cart, 'ecocash', null);
+            $this->sendEcocashConfirmation($phone, $order, $isPickup, $cart, $delivery);
+            $this->notifyAdmin($order, $isPickup, $cart, 'ecocash', null, $delivery);
         } else {
             $order->update(['payment_status' => 'failed']);
 
             $orderNum = 'SB' . str_pad($order->id, 5, '0', STR_PAD_LEFT);
+            $convo    = ConversationState::where('phone', $phone)->first();
 
-            /** @var ConversationState|null $convo */
-            $convo = ConversationState::where('phone', $phone)->first();
-
-            // Only restore cart if the user hasn't already moved on
-            // (e.g. they switched to cash or restarted the convo)
             if ($convo && $convo->state === 'awaiting_ecocash_payment') {
+                $orderText = $isPickup ? 'pickup' : "delivery|{$delivery}";
+
                 $convo->update([
                     'state'      => 'payment_choice',
                     'cart'       => json_encode($cart),
-                    'order_text' => $isPickup ? 'pickup' : 'delivery',
+                    'order_text' => $orderText,
                 ]);
 
                 $this->sendButtons(
@@ -1012,15 +1234,15 @@ class WhatsAppController extends Controller
     }
 
     // ══════════════════════════════════════════
-    //  ECOCASH CONFIRMATION — sent after successful poll
+    //  ECOCASH CONFIRMATION
     // ══════════════════════════════════════════
     private function sendEcocashConfirmation(
         string $phone,
         Order $order,
         bool $isPickup,
-        array $cart
+        array $cart,
+        float $delivery = 0.0
     ): void {
-        $delivery    = $isPickup ? 0.0 : 1.50;
         $subtotal    = $this->cartTotal($cart);
         $total       = round($subtotal + $delivery, 2);
         $summary     = $this->cartSummaryFull($cart);
@@ -1028,7 +1250,6 @@ class WhatsAppController extends Controller
         $etaLine     = $isPickup ? "📍 Pickup ready in *20–30 mins*" : "🚗 Delivery ETA *30–45 mins*";
         $orderNum    = 'SB' . str_pad($order->id, 5, '0', STR_PAD_LEFT);
 
-        /** @var ConversationState|null $convo */
         $convo = ConversationState::where('phone', $phone)->first();
         if ($convo) {
             $convo->update([
@@ -1080,23 +1301,42 @@ class WhatsAppController extends Controller
     // ══════════════════════════════════════════
     //  CASH AMOUNT PICKER
     // ══════════════════════════════════════════
-    private function sendCashAmountPicker(string $phone, float $total, bool $isPickup): mixed
-    {
-        $typeLabel = $isPickup ? 'Pickup' : 'Delivery';
+    private function sendCashAmountPicker(
+        string $phone,
+        ConversationState $convo,
+        float $total,
+        bool $isPickup,
+        ?string $notice = null
+    ): mixed {
+        $cart        = $this->getCart($convo);
+        $summary     = $this->cartSummaryFull($cart);
+        $subtotal    = $this->cartTotal($cart);
+        $deliveryFee = $isPickup ? 0.00 : round($total - $subtotal, 2);
+        $orderType   = $isPickup ? 'Pickup' : 'Delivery';
+        $typeLine    = $isPickup
+            ? "🏃 *Pickup:* Free"
+            : "🚗 *Delivery:* \$" . number_format($deliveryFee, 2);
+
+        $orderNumber = 'SB' . str_pad((string) $convo->id, 5, '0', STR_PAD_LEFT);
 
         $denominations = [1, 2, 5, 10, 20, 50, 100];
         $suggestions   = [];
+
         foreach ($denominations as $d) {
-            if ($d >= $total) {
+            if ($d > $total) {
                 $suggestions[] = $d;
-                if (count($suggestions) === 3) break;
             }
         }
+
         $pad = 100;
-        while (count($suggestions) < 3) {
+        while (count($suggestions) < 4) {
             $pad += 50;
-            if (!in_array($pad, $suggestions)) $suggestions[] = $pad;
+            if (!in_array($pad, $suggestions, true)) {
+                $suggestions[] = $pad;
+            }
         }
+
+        $suggestions = array_slice($suggestions, 0, 4);
 
         $rows = [[
             'id'          => 'cash_amt_exact',
@@ -1105,20 +1345,37 @@ class WhatsAppController extends Controller
         ]];
 
         foreach ($suggestions as $d) {
-            if ((float) $d === $total) continue;
+            $change = round($d - $total, 2);
             $rows[] = [
                 'id'          => 'cash_amt_' . $d,
                 'title'       => '$' . number_format($d, 2),
-                'description' => '🔄 Change: $' . number_format(round($d - $total, 2), 2),
+                'description' => 'Change: $' . number_format($change, 2),
             ];
         }
 
+        $body = "💵 *How much cash will you be paying with?*\n"
+            . self::DIV2 . "\n"
+            . "🧾 *Order:* {$orderNumber}   📦 *{$orderType}*\n"
+            . self::DIV2 . "\n"
+            . "{$summary}\n"
+            . self::DIV2 . "\n"
+            . "🛍️ *Subtotal:* \$" . number_format($subtotal, 2) . "\n"
+            . "{$typeLine}\n"
+            . "💰 *Total:* \$" . number_format($total, 2) . "\n"
+            . self::DIV2 . "\n";
+
+        if ($notice) {
+            $body .= "{$notice}\n" . self::DIV2 . "\n";
+        }
+
+        $body .= "Tap a quick amount or type your own.\n_Example: 5 or 50_";
+
         return $this->sendList(
             $phone,
-            "💵 *Cash on {$typeLabel}*\n\nYour total is *\${$total}*.\n\nSelect the note you'll be paying with so we can prepare your change:",
+            $body,
             "Savanna Bites Express",
             "Choose Amount",
-            [['title' => '💵 Select Amount', 'rows' => $rows]]
+            [['title' => 'Choose Amount', 'rows' => $rows]]
         );
     }
 
@@ -1129,8 +1386,9 @@ class WhatsAppController extends Controller
     {
         $convo->refresh();
         $cart     = $this->getCart($convo);
-        $isPickup = $convo->order_text === 'pickup';
-        $delivery = $isPickup ? 0.0 : 1.50;
+        $meta     = $this->parseOrderMeta($convo->order_text);
+        $isPickup = $meta['is_pickup'];
+        $delivery = $meta['delivery'];
         $total    = round($this->cartTotal($cart) + $delivery, 2);
 
         if ($text === 'cash_amt_exact') {
@@ -1140,14 +1398,26 @@ class WhatsAppController extends Controller
         } elseif (is_numeric($text)) {
             $amount = (float) $text;
         } else {
-            return $this->sendCashAmountPicker($phone, $total, $isPickup);
+            return $this->sendCashAmountPicker(
+                $phone,
+                $convo,
+                $total,
+                $isPickup,
+                "⚠️ Please choose a quick amount or type a valid number."
+            );
         }
 
         if ($amount < $total) {
-            return $this->sendCashAmountPicker($phone, $total, $isPickup);
+            return $this->sendCashAmountPicker(
+                $phone,
+                $convo,
+                $total,
+                $isPickup,
+                "⚠️ Amount is less than the total. Please enter at least \$" . number_format($total, 2) . "."
+            );
         }
 
-        return $this->confirmCashOrder($phone, $convo, $cart, $isPickup, [
+        return $this->confirmCashOrder($phone, $convo, $cart, $isPickup, $delivery, [
             'tendered' => $amount,
             'change'   => round($amount - $total, 2),
         ]);
@@ -1161,9 +1431,9 @@ class WhatsAppController extends Controller
         ConversationState $convo,
         array $cart,
         bool $isPickup,
+        float $delivery,
         array $cashInfo
     ) {
-        $delivery    = $isPickup ? 0.0 : 1.50;
         $subtotal    = $this->cartTotal($cart);
         $total       = round($subtotal + $delivery, 2);
         $status      = $isPickup ? 'pickup' : 'delivery';
@@ -1187,7 +1457,7 @@ class WhatsAppController extends Controller
             'phone'          => $phone,
             'order_text'     => $orderText,
             'total'          => $total,
-            'status'         => $status,
+            'status'         => 'pending',
             'order_type'     => $status,
             'payment_method' => 'cash',
             'payment_status' => 'pending',
@@ -1201,20 +1471,23 @@ class WhatsAppController extends Controller
             'order_text' => (string) $order->id,
         ]);
 
+        $controller     = $this;
         $notifyOrder    = $order;
         $notifyIsPickup = $isPickup;
         $notifyCart     = $cart;
         $notifyCash     = $cashInfo;
-        $controller     = $this;
+        $notifyDelivery = $delivery;
 
-        dispatch(static function () use ($controller, $notifyOrder, $notifyIsPickup, $notifyCart, $notifyCash) {
-            $controller->notifyAdmin($notifyOrder, $notifyIsPickup, $notifyCart, 'cash', $notifyCash);
+        dispatch(static function () use (
+            $controller,
+            $notifyOrder,
+            $notifyIsPickup,
+            $notifyCart,
+            $notifyCash,
+            $notifyDelivery
+        ) {
+            $controller->notifyAdmin($notifyOrder, $notifyIsPickup, $notifyCart, 'cash', $notifyCash, $notifyDelivery);
         })->afterResponse();
-
-        $paymentNote =
-            "💵 *Payment:* Cash on {$typeLabel}\n"
-            . "   Paying with: *\${$tendered}*\n"
-            . $changeNote;
 
         return $this->sendList(
             $phone,
@@ -1226,7 +1499,9 @@ class WhatsAppController extends Controller
                 . $deliverLine
                 . "💵 *Total:    \${$total}*\n"
                 . self::DIV2 . "\n\n"
-                . "{$paymentNote}\n\n"
+                . "💵 *Payment:* Cash on {$typeLabel}\n"
+                . "   Paying with: *\${$tendered}*\n"
+                . $changeNote . "\n\n"
                 . "{$etaLine}\n\n"
                 . "Thank you for choosing *Savanna Bites!* 🙏",
             "Tap below to manage your order",
@@ -1260,7 +1535,6 @@ class WhatsAppController extends Controller
     // ══════════════════════════════════════════
     private function handleReorder(string $phone, ConversationState $convo)
     {
-        /** @var Order|null $lastOrder */
         $lastOrder = Order::where('phone', $phone)
             ->where('phone', '!=', 'POS')
             ->whereNotNull('order_text')
@@ -1295,7 +1569,7 @@ class WhatsAppController extends Controller
             "Choose delivery method",
             [
                 ['id' => 'pickup',   'title' => '🏃 Pickup'],
-                ['id' => 'delivery', 'title' => '🚗 Delivery (+$1.50)'],
+                ['id' => 'delivery', 'title' => '🚗 Delivery'],
             ]
         );
     }
@@ -1305,7 +1579,6 @@ class WhatsAppController extends Controller
     // ══════════════════════════════════════════
     private function handleReview(string $phone, string $sentiment, int $orderId, ConversationState $convo): mixed
     {
-        /** @var Order|null $order */
         $order = Order::find($orderId, ['id', 'phone', 'rating']);
 
         if ($order && $order->phone === $phone) {
@@ -1341,9 +1614,7 @@ class WhatsAppController extends Controller
     private function handleBadFeedback(string $phone, string $text, ConversationState $convo): mixed
     {
         $orderId = (int) $convo->order_text;
-
-        /** @var Order|null $order */
-        $order = Order::find($orderId, ['id', 'phone']);
+        $order   = Order::find($orderId, ['id', 'phone']);
 
         if ($order && $order->phone === $phone) {
             $order->update(['review' => $text]);
@@ -1384,31 +1655,31 @@ class WhatsAppController extends Controller
     // ══════════════════════════════════════════
     private function sendViewOrder(string $phone, ConversationState $convo)
     {
-        /** @var Order|null $order */
         $order = $convo->order_text
             ? Order::find(
                 (int) $convo->order_text,
-                ['id', 'phone', 'status', 'payment_method', 'payment_status', 'total', 'created_at']
-              )
+                ['id', 'phone', 'status', 'order_type', 'payment_method', 'payment_status', 'total', 'created_at']
+            )
             : null;
 
         if (!$order) {
             return $this->sendCompletedMenu($phone);
         }
 
-        $typeIcon  = $order->status === 'delivery' ? '🚗 Delivery' : '🏃 Pickup';
-        $payIcon   = ($order->payment_method ?? 'cash') === 'ecocash' ? '📱 EcoCash' : '💵 Cash';
+        $typeIcon  = $order->order_type === 'delivery' ? '🚗 Delivery' : '🏃 Pickup';
+        $payIcon   = $order->payment_method === 'ecocash' ? '📱 EcoCash' : '💵 Cash';
         $payStatus = match ($order->payment_status ?? 'pending') {
             'paid'   => '✅ Paid',
             'failed' => '❌ Failed',
             default  => '⏳ Pending',
         };
-        $placedAt  = $order->created_at->format('H:i, d M Y');
+        $placedAt = $order->created_at->format('H:i, d M Y');
+        $orderNum = 'SB' . str_pad($order->id, 5, '0', STR_PAD_LEFT);
 
         return $this->sendButtons(
             $phone,
             "🔍 *Order Details*\n\n"
-                . "🆔 Reference: *#SB" . str_pad($order->id, 5, '0', STR_PAD_LEFT) . "*\n"
+                . "🆔 Reference: *#{$orderNum}*\n"
                 . "🕐 Placed: {$placedAt}\n"
                 . "📦 Type: {$typeIcon}\n"
                 . "💳 Payment: {$payIcon} — {$payStatus}\n"
@@ -1472,13 +1743,19 @@ class WhatsAppController extends Controller
     // ══════════════════════════════════════════
     //  ADMIN NOTIFICATION
     // ══════════════════════════════════════════
-    public function notifyAdmin(Order $order, bool $isPickup, array $cart, string $payMethod, ?array $cashInfo): void
-    {
+    public function notifyAdmin(
+        Order $order,
+        bool $isPickup,
+        array $cart,
+        string $payMethod,
+        ?array $cashInfo,
+        float $delivery = 0.0
+    ): void {
         $adminPhone = config('services.whatsapp.admin_phone');
         if (!$adminPhone) return;
 
-        $type = $isPickup ? '🏃 Pickup' : '🚗 Delivery';
         $menu = $this->getMenu();
+        $type = $isPickup ? '🏃 Pickup' : '🚗 Delivery';
 
         $itemsList = implode("\n", array_map(
             fn($kw, $qty) => "  • {$qty}x {$menu[$kw]['name']} — \$" . number_format($qty * $menu[$kw]['price'], 2),
@@ -1495,6 +1772,10 @@ class WhatsAppController extends Controller
             $payLine   = "💵 Cash on {$typeLabel}  |  Paying: \${$tendered}  |  Change: \${$change}";
         }
 
+        $deliveryLine = (!$isPickup && $delivery > 0)
+            ? "\n🚗 Delivery Fee: \$" . number_format($delivery, 2)
+            : '';
+
         $orderNum = 'SB' . str_pad($order->id, 5, '0', STR_PAD_LEFT);
 
         $this->sendText(
@@ -1506,7 +1787,8 @@ class WhatsAppController extends Controller
                 . "🕐 Time: " . now()->format('H:i') . "\n\n"
                 . "🛒 *Items:*\n{$itemsList}\n\n"
                 . self::DIV2 . "\n"
-                . "💵 *Total: \${$order->total}*\n"
+                . "💵 *Total: \${$order->total}*"
+                . $deliveryLine . "\n"
                 . "{$type}  |  {$payLine}\n"
                 . self::DIV2
         );
@@ -1541,10 +1823,6 @@ class WhatsAppController extends Controller
         )), 2);
     }
 
-    /**
-     * Rebuild a cart array from order_text format: "1 burger 2 chips ..."
-     * Used when recovering a cart from a previously created Order record.
-     */
     private function rebuildCartFromOrderText(string $orderText): array
     {
         $parts = preg_split('/\s+/', trim($orderText));

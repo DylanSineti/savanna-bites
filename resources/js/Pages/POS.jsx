@@ -17,9 +17,24 @@ function injectFonts() {
 /* ─────────────────────────────────────────────────────────────
    CONSTANTS
 ───────────────────────────────────────────────────────────── */
-const STATUS_FLOW_DELIVERY = ["pending", "preparing", "ready", "out_for_delivery", "completed"];
-const STATUS_FLOW_PICKUP   = ["pending", "preparing", "ready", "completed"];
-const getFlow = (order) => order?.order_type === "pickup" ? STATUS_FLOW_PICKUP : STATUS_FLOW_DELIVERY;
+const STATUS_FLOW_DELIVERY_CASH    = ["pending", "preparing", "out_for_delivery"];
+const STATUS_FLOW_PICKUP_CASH      = ["pending", "preparing", "ready"];
+const STATUS_FLOW_DELIVERY_ECOCASH = ["pending", "preparing", "out_for_delivery", "completed"];
+const STATUS_FLOW_PICKUP_ECOCASH   = ["pending", "preparing", "ready", "completed"];
+
+const getFlow = (order) => {
+  const isCash   = order?.payment_method === "cash";
+  const isPickup = order?.order_type     === "pickup";
+  if (isCash) return isPickup ? STATUS_FLOW_PICKUP_CASH      : STATUS_FLOW_DELIVERY_CASH;
+  return            isPickup ? STATUS_FLOW_PICKUP_ECOCASH   : STATUS_FLOW_DELIVERY_ECOCASH;
+};
+
+const nextSt = (s, order) => {
+  if (s === "pickup" || s === "delivery") return "preparing";
+  const flow = getFlow(order);
+  const i    = flow.indexOf(s);
+  return i >= 0 && i < flow.length - 1 ? flow[i + 1] : null;
+};
 
 const STATUS = {
   pending:          { label: "Pending",           short: "Pending",  color: "#f59e0b" },
@@ -78,14 +93,11 @@ async function apiFetch(url, opts = {}) {
   if (!r.ok) throw new Error(String(r.status));
   return r.json();
 }
-const nextSt  = (s, order) => {
-  if (s === "pickup" || s === "delivery") return "preparing";
-  const flow = getFlow(order); const i = flow.indexOf(s);
-  return i >= 0 && i < flow.length - 1 ? flow[i + 1] : null;
-};
-const money   = (n) => "$" + Number(n || 0).toFixed(2);
-const ac      = (s = "") => { let h = 0; for (let i = 0; i < s.length; i++) h = s.charCodeAt(i) + ((h << 5) - h); return PALETTE[Math.abs(h) % PALETTE.length]; };
+
+const money    = (n) => "$" + Number(n || 0).toFixed(2);
+const ac       = (s = "") => { let h = 0; for (let i = 0; i < s.length; i++) h = s.charCodeAt(i) + ((h << 5) - h); return PALETTE[Math.abs(h) % PALETTE.length]; };
 const initials = (s = "") => s.replace(/\D/g, "").slice(-4, -2) || s.replace(/\+/g, "").slice(0, 2).toUpperCase() || "?";
+
 function timeAgo(d) {
   const s = Math.floor((Date.now() - new Date(d)) / 1000);
   if (s < 60) return s + "s"; const m = Math.floor(s / 60);
@@ -171,10 +183,10 @@ function Skeleton({ c }) {
    ORDER CARD
 ───────────────────────────────────────────────────────────── */
 function OrderCard({ order, selected, onClick, c }) {
-  const sc  = STATUS[order.status] ?? STATUS.pending;
-  const tot = parseFloat(order.total) || 0;
+  const sc   = STATUS[order.status] ?? STATUS.pending;
+  const tot  = parseFloat(order.total) || 0;
   const paid = order.payment_status === "paid";
-  const txt = (order.order_text ?? "").replace(/\n+/g, " · ").trim();
+  const txt  = (order.order_text ?? "").replace(/\n+/g, " · ").trim();
   const [hover, setHover] = useState(false);
 
   return (
@@ -264,8 +276,8 @@ function FilterBar({ orders, filter, setFilter, c }) {
     <div style={{ display: "flex", gap: 2, padding: "8px 12px", borderBottom: "1px solid " + c.border, overflowX: "auto", flexShrink: 0 }}>
       {tabs.map(tab => {
         const count = tab.k === "all" ? orders.length : orders.filter(o => o.status === tab.k).length;
-        const on  = filter === tab.k;
-        const col = tab.k === "all" ? c.text : (STATUS[tab.k]?.color ?? c.muted);
+        const on    = filter === tab.k;
+        const col   = tab.k === "all" ? c.text : (STATUS[tab.k]?.color ?? c.muted);
         return (
           <button key={tab.k} onClick={() => setFilter(tab.k)} style={{
             flexShrink: 0, display: "inline-flex", alignItems: "center", gap: 5,
@@ -295,12 +307,21 @@ function FilterBar({ orders, filter, setFilter, c }) {
 /* ─────────────────────────────────────────────────────────────
    STATUS BLOCK — timeline + advance CTA
 ───────────────────────────────────────────────────────────── */
-function StatusBlock({ order, onAdvance, saving, c }) {
-  const flow = getFlow(order);
-  const idx  = flow.indexOf(order.status);
-  const next = nextSt(order.status, order);
-  const nCfg = next ? STATUS[next] : null;
-  const pct  = flow.length > 1 ? (idx / (flow.length - 1)) * 100 : 100;
+function StatusBlock({ order, onAdvance, onCompleteAndPay, saving, c }) {
+  const flow     = getFlow(order);
+  const idx      = flow.indexOf(order.status);
+  const next     = nextSt(order.status, order);
+  const nCfg     = next ? STATUS[next] : null;
+  const pct      = flow.length > 1 ? (idx / (flow.length - 1)) * 100 : 100;
+  const isCash   = order.payment_method === "cash";
+
+  // Cash orders: the final advance button becomes "Collected/Delivered & Paid"
+  const isPreFinal = isCash && (
+    (order.order_type === "pickup"   && order.status === "ready") ||
+    (order.order_type === "delivery" && order.status === "out_for_delivery")
+  );
+
+  const completedAlready = order.status === "completed";
 
   return (
     <div style={{ padding: "0 24px 24px" }}>
@@ -351,22 +372,7 @@ function StatusBlock({ order, onAdvance, saving, c }) {
       </div>
 
       {/* CTA */}
-      {next ? (
-        <button onClick={onAdvance} disabled={saving} style={{
-          width: "100%", padding: "14px",
-          borderRadius: 5, border: "none",
-          background: nCfg.color,
-          color: "#fff",
-          fontFamily: "JetBrains Mono,monospace", fontSize: 12,
-          letterSpacing: "0.1em", textTransform: "uppercase",
-          fontWeight: 700, cursor: saving ? "not-allowed" : "pointer",
-          opacity: saving ? 0.6 : 1,
-          boxShadow: "0 4px 20px " + nCfg.color + "40",
-          transition: "opacity .15s, box-shadow .15s",
-        }}>
-          {saving ? "Updating…" : "→ Mark as " + nCfg.label}
-        </button>
-      ) : (
+      {completedAlready ? (
         <div style={{
           textAlign: "center", padding: "13px 0",
           borderRadius: 5, background: "rgba(74,222,128,.08)",
@@ -377,7 +383,39 @@ function StatusBlock({ order, onAdvance, saving, c }) {
         }}>
           ✓ Order Completed
         </div>
-      )}
+      ) : isPreFinal ? (
+        // Final cash action — completes order + confirms payment in one tap
+        <button onClick={onCompleteAndPay} disabled={saving} style={{
+          width: "100%", padding: "14px",
+          borderRadius: 5, border: "none",
+          background: "#10b981", color: "#fff",
+          fontFamily: "JetBrains Mono,monospace", fontSize: 12,
+          letterSpacing: "0.1em", textTransform: "uppercase",
+          fontWeight: 700, cursor: saving ? "not-allowed" : "pointer",
+          opacity: saving ? 0.6 : 1,
+          boxShadow: "0 4px 20px rgba(16,185,129,.4)",
+          transition: "opacity .15s, box-shadow .15s",
+        }}>
+          {saving ? "Completing…" : order.order_type === "pickup"
+            ? "✓ Collected & Paid"
+            : "✓ Delivered & Paid"}
+        </button>
+      ) : next ? (
+        // Normal advance button for all other statuses
+        <button onClick={onAdvance} disabled={saving} style={{
+          width: "100%", padding: "14px",
+          borderRadius: 5, border: "none",
+          background: nCfg.color, color: "#fff",
+          fontFamily: "JetBrains Mono,monospace", fontSize: 12,
+          letterSpacing: "0.1em", textTransform: "uppercase",
+          fontWeight: 700, cursor: saving ? "not-allowed" : "pointer",
+          opacity: saving ? 0.6 : 1,
+          boxShadow: "0 4px 20px " + nCfg.color + "40",
+          transition: "opacity .15s, box-shadow .15s",
+        }}>
+          {saving ? "Updating…" : "→ Mark as " + nCfg.label}
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -386,14 +424,14 @@ function StatusBlock({ order, onAdvance, saving, c }) {
    PAY BLOCK
 ───────────────────────────────────────────────────────────── */
 function PayBlock({ order, c, amt, setAmt, saving, marking, onSave, onCashFull, onEcoPaid }) {
-  const tot      = parseFloat(order.total) || 0;
-  const paid     = parseFloat(order.amount_paid) || 0;
-  const full     = order.payment_status === "paid";
-  const stated   = !full && paid > 0; // amount pre-declared by customer on WhatsApp
+  const tot    = parseFloat(order.total) || 0;
+  const paid   = parseFloat(order.amount_paid) || 0;
+  const full   = order.payment_status === "paid";
+  const stated = !full && paid > 0;
   const stChange = stated ? Math.max(0, paid - tot) : 0;
-  const pct      = full ? 100 : 0;
-  const ent      = parseFloat(amt);
-  const chg      = !isNaN(ent) && ent > tot ? ent - tot : 0;
+  const pct    = full ? 100 : 0;
+  const ent    = parseFloat(amt);
+  const chg    = !isNaN(ent) && ent > tot ? ent - tot : 0;
 
   if (order.payment_method === "cash") {
     return (
@@ -416,11 +454,7 @@ function PayBlock({ order, c, amt, setAmt, saving, marking, onSave, onCashFull, 
 
         {/* progress bar */}
         <div style={{ height: 4, borderRadius: 99, background: c.border, overflow: "hidden", marginBottom: 16 }}>
-          <div style={{
-            height: "100%", width: pct + "%", borderRadius: 99,
-            background: full ? "#10b981" : "#f59e0b",
-            transition: "width .4s",
-          }} />
+          <div style={{ height: "100%", width: pct + "%", borderRadius: 99, background: full ? "#10b981" : "#f59e0b", transition: "width .4s" }} />
         </div>
 
         {full ? (
@@ -428,7 +462,6 @@ function PayBlock({ order, c, amt, setAmt, saving, marking, onSave, onCashFull, 
             <span style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 12, color: "#4ade80", letterSpacing: "0.1em" }}>✓ FULLY PAID</span>
           </div>
         ) : stated ? (
-          /* ── Customer pre-stated amount via WhatsApp ── */
           <>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 16px", borderRadius: 4, background: "rgba(56,189,248,.07)", border: "1px solid rgba(56,189,248,.25)", marginBottom: 12, borderLeft: "3px solid #38bdf8" }}>
               <div>
@@ -443,8 +476,7 @@ function PayBlock({ order, c, amt, setAmt, saving, marking, onSave, onCashFull, 
               )}
             </div>
             <button onClick={onCashFull} disabled={marking} style={{
-              width: "100%", padding: "14px",
-              borderRadius: 5, border: "none",
+              width: "100%", padding: "14px", borderRadius: 5, border: "none",
               background: "#10b981", color: "#fff",
               fontFamily: "JetBrains Mono,monospace", fontSize: 12,
               letterSpacing: "0.1em", textTransform: "uppercase",
@@ -455,14 +487,10 @@ function PayBlock({ order, c, amt, setAmt, saving, marking, onSave, onCashFull, 
             </button>
           </>
         ) : (
-          /* ── No pre-stated amount — staff enters cash received ── */
           <>
-            {/* label */}
             <div style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 9, letterSpacing: "0.16em", textTransform: "uppercase", color: c.muted, marginBottom: 8 }}>
               Cash Received
             </div>
-
-            {/* amount input */}
             <div style={{ position: "relative", marginBottom: 8 }}>
               <span style={{ position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)", fontFamily: "JetBrains Mono,monospace", fontSize: 15, color: c.muted, pointerEvents: "none" }}>$</span>
               <input
@@ -480,28 +508,22 @@ function PayBlock({ order, c, amt, setAmt, saving, marking, onSave, onCashFull, 
                 onBlur={e => e.target.style.borderColor = c.border}
               />
             </div>
-
-            {/* quick chips */}
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
               <button onClick={() => setAmt(tot.toFixed(2))} style={{ padding: "5px 11px", borderRadius: 3, background: c.subBg, border: "1px solid " + c.border, color: c.muted, fontFamily: "JetBrains Mono,monospace", fontSize: 10, cursor: "pointer" }}>
                 Exact {money(tot)}
               </button>
-              {[5,10,20,50].filter(d => d > tot).slice(0,3).map(d => (
+              {[5, 10, 20, 50].filter(d => d > tot).slice(0, 3).map(d => (
                 <button key={d} onClick={() => setAmt(String(d))} style={{ padding: "5px 11px", borderRadius: 3, background: c.subBg, border: "1px solid " + c.border, color: c.muted, fontFamily: "JetBrains Mono,monospace", fontSize: 10, cursor: "pointer" }}>
                   ${d}
                 </button>
               ))}
             </div>
-
-            {/* change / owed feedback */}
             {chg > 0 && (
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", borderRadius: 4, background: "rgba(251,191,36,.08)", border: "1px solid rgba(251,191,36,.25)", marginBottom: 10, borderLeft: "3px solid #fbbf24" }}>
                 <span style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 10, color: "#fbbf24", letterSpacing: "0.08em", textTransform: "uppercase" }}>Give Change</span>
                 <span style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 18, fontWeight: 700, color: "#fbbf24", letterSpacing: "-0.02em" }}>{money(chg)}</span>
               </div>
             )}
-
-            {/* primary CTA — adapts to what's entered */}
             <button
               onClick={ent >= tot ? onCashFull : onSave}
               disabled={saving || marking || isNaN(ent) || ent <= 0}
@@ -581,15 +603,11 @@ function AssignBlock({ order, team, onAssign, c }) {
 
   return (
     <div style={{ padding: "0 24px 20px" }}>
-      <div style={{
-        borderRadius: 8,
-        border: "1px solid " + c.border,
-        overflow: "hidden",
-      }}>
+      <div style={{ borderRadius: 8, border: "1px solid " + c.border, overflow: "hidden" }}>
         {team.map((m, i) => {
-          const on      = current === m.id;
-          const col     = ac(m.name);
-          const isLast  = i === team.length - 1;
+          const on     = current === m.id;
+          const col    = ac(m.name);
+          const isLast = i === team.length - 1;
 
           return (
             <button
@@ -599,30 +617,24 @@ function AssignBlock({ order, team, onAssign, c }) {
                 display: "flex", alignItems: "center", gap: 14,
                 width: "100%", padding: "13px 16px",
                 borderBottom: isLast ? "none" : "1px solid " + c.dimSep,
-                background: on
-                  ? (c.dark ? "rgba(255,255,255,.04)" : "rgba(0,0,0,.025)")
-                  : "transparent",
+                background: on ? (c.dark ? "rgba(255,255,255,.04)" : "rgba(0,0,0,.025)") : "transparent",
                 border: "none",
                 borderBottom: isLast ? "none" : "1px solid " + c.dimSep,
                 cursor: "pointer", textAlign: "left",
                 transition: "background .12s",
               }}
             >
-              {/* coloured avatar */}
               <div style={{
                 width: 36, height: 36, borderRadius: 8, flexShrink: 0,
                 background: col + "18",
                 border: "1.5px solid " + col + (on ? "60" : "30"),
                 display: "flex", alignItems: "center", justifyContent: "center",
                 fontFamily: "JetBrains Mono,monospace", fontWeight: 700,
-                fontSize: 12, color: col,
-                letterSpacing: "0.03em",
+                fontSize: 12, color: col, letterSpacing: "0.03em",
                 transition: "border-color .15s",
               }}>
                 {m.name.slice(0, 2).toUpperCase()}
               </div>
-
-              {/* name + role */}
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{
                   fontFamily: "Manrope,sans-serif", fontSize: 13,
@@ -633,33 +645,22 @@ function AssignBlock({ order, team, onAssign, c }) {
                 }}>
                   {m.name}
                 </div>
-                <div style={{
-                  fontFamily: "JetBrains Mono,monospace", fontSize: 9,
-                  color: c.muted, letterSpacing: "0.1em",
-                  textTransform: "uppercase", marginTop: 2,
-                }}>
+                <div style={{ fontFamily: "JetBrains Mono,monospace", fontSize: 9, color: c.muted, letterSpacing: "0.1em", textTransform: "uppercase", marginTop: 2 }}>
                   {m.role}
                 </div>
               </div>
-
-              {/* assigned badge */}
               {on ? (
                 <div style={{
                   fontFamily: "JetBrains Mono,monospace", fontSize: 9,
                   letterSpacing: "0.1em", textTransform: "uppercase",
                   padding: "3px 8px", borderRadius: 3,
                   background: col + "18", color: col,
-                  border: "1px solid " + col + "35",
-                  flexShrink: 0,
+                  border: "1px solid " + col + "35", flexShrink: 0,
                 }}>
                   Assigned
                 </div>
               ) : (
-                <div style={{
-                  width: 16, height: 16, borderRadius: 4, flexShrink: 0,
-                  border: "1.5px solid " + c.border,
-                  background: "transparent",
-                }} />
+                <div style={{ width: 16, height: 16, borderRadius: 4, flexShrink: 0, border: "1.5px solid " + c.border, background: "transparent" }} />
               )}
             </button>
           );
@@ -672,19 +673,14 @@ function AssignBlock({ order, team, onAssign, c }) {
 /* ─────────────────────────────────────────────────────────────
    DETAIL PANEL
 ───────────────────────────────────────────────────────────── */
-function DetailPanel({ order, team, c, amt, setAmt, saving, savingStatus, marking, onSave, onCashFull, onEcoPaid, onAssign, onAdvance }) {
-  const sc  = STATUS[order.status] ?? STATUS.pending;
+function DetailPanel({ order, team, c, amt, setAmt, saving, savingStatus, marking, onSave, onCashFull, onEcoPaid, onAssign, onAdvance, onCompleteAndPay }) {
   const tot = parseFloat(order.total) || 0;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", flex: 1, overflow: "hidden" }}>
 
       {/* Header */}
-      <div style={{
-        padding: "20px 24px 18px",
-        borderBottom: "1px solid " + c.border,
-        background: c.subBg, flexShrink: 0,
-      }}>
+      <div style={{ padding: "20px 24px 18px", borderBottom: "1px solid " + c.border, background: c.subBg, flexShrink: 0 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
           <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
             <Avatar name={order.phone} sz={46} />
@@ -729,7 +725,6 @@ function DetailPanel({ order, team, c, amt, setAmt, saving, savingStatus, markin
           </div>
         </div>
 
-        {/* Divider */}
         <div style={{ height: 1, background: c.border }} />
 
         {/* Payment */}
@@ -746,7 +741,13 @@ function DetailPanel({ order, team, c, amt, setAmt, saving, savingStatus, markin
 
         {/* Status */}
         <SecHead c={c}>Order Progress</SecHead>
-        <StatusBlock order={order} onAdvance={onAdvance} saving={savingStatus} c={c} />
+        <StatusBlock
+          order={order}
+          onAdvance={onAdvance}
+          onCompleteAndPay={onCompleteAndPay}
+          saving={savingStatus}
+          c={c}
+        />
       </div>
     </div>
   );
@@ -759,7 +760,7 @@ function EmptyDetail({ orders, c }) {
   const stats = [
     { l: "Pending",   n: orders.filter(o => o.status === "pending").length,          col: "#f59e0b" },
     { l: "Preparing", n: orders.filter(o => o.status === "preparing").length,        col: "#3b82f6" },
-    { l: "Ready",     n: orders.filter(o => o.status === "ready").length,             col: "#10b981" },
+    { l: "Ready",     n: orders.filter(o => o.status === "ready").length,            col: "#10b981" },
     { l: "On Way",    n: orders.filter(o => o.status === "out_for_delivery").length, col: "#a78bfa" },
   ];
   return (
@@ -794,7 +795,7 @@ function EmptyDetail({ orders, c }) {
 ───────────────────────────────────────────────────────────── */
 export default function POS() {
   const { theme: t } = useTheme();
-  const c = chrome(t);
+  const c       = chrome(t);
   const isMobile = useIsMobile();
 
   const [orders, setOrders]             = useState([]);
@@ -833,7 +834,9 @@ export default function POS() {
     return () => clearInterval(id);
   }, [fetchQueue, fetchTeam]);
 
-  useEffect(() => { if (selected) setAmt((parseFloat(selected.amount_paid) || 0) > 0 ? String(selected.amount_paid) : ""); }, [selected?.id]);
+  useEffect(() => {
+    if (selected) setAmt((parseFloat(selected.amount_paid) || 0) > 0 ? String(selected.amount_paid) : "");
+  }, [selected?.id]);
 
   const patchOrder = async (id, body) => {
     const data = await apiFetch("/api/orders/" + id, { method: "PATCH", body: JSON.stringify(body) });
@@ -848,32 +851,66 @@ export default function POS() {
   };
 
   const handleSave = async () => {
-    if (!selected) return; const v = parseFloat(amt);
-    if (isNaN(v) || v < 0) return; setSaving(true);
-    try { const p = { amount_paid: v }; if (v >= parseFloat(selected.total)) p.payment_status = "paid"; await patchOrder(selected.id, p); }
-    finally { setSaving(false); }
+    if (!selected) return;
+    const v = parseFloat(amt);
+    if (isNaN(v) || v < 0) return;
+    setSaving(true);
+    try {
+      const p = { amount_paid: v };
+      if (v >= parseFloat(selected.total)) p.payment_status = "paid";
+      await patchOrder(selected.id, p);
+    } finally { setSaving(false); }
   };
+
   const handleCashFull = async () => {
-    if (!selected) return; setMarking(true);
-    const statedAmt = parseFloat(selected.amount_paid) || 0;
+    if (!selected) return;
+    setMarking(true);
+    const statedAmt  = parseFloat(selected.amount_paid) || 0;
     const confirmAmt = statedAmt >= parseFloat(selected.total) ? statedAmt : parseFloat(selected.total);
     try { await patchOrder(selected.id, { payment_status: "paid", amount_paid: confirmAmt }); }
     finally { setMarking(false); }
   };
+
   const handleEcoPaid = async () => {
-    if (!selected) return; setMarking(true);
-    try { await patchOrder(selected.id, { payment_status: "paid" }); } finally { setMarking(false); }
+    if (!selected) return;
+    setMarking(true);
+    try { await patchOrder(selected.id, { payment_status: "paid" }); }
+    finally { setMarking(false); }
   };
+
   const handleAssign = async (memberId) => {
-    if (!selected) return; setSaving(true);
-    try { await patchOrder(selected.id, { assigned_to: memberId ? parseInt(memberId) : null }); } finally { setSaving(false); }
+    if (!selected) return;
+    setSaving(true);
+    try { await patchOrder(selected.id, { assigned_to: memberId ? parseInt(memberId) : null }); }
+    finally { setSaving(false); }
   };
+
   const handleAdvance = async () => {
-    if (!selected) return; const next = nextSt(selected.status, selected); if (!next) return;
+    if (!selected) return;
+    const next = nextSt(selected.status, selected);
+    if (!next) return;
     setSavingStatus(true);
     try {
       await patchOrder(selected.id, { status: next });
-      if (next === "completed") { setOrders(prev => prev.filter(o => o.id !== selected.id)); setSelected(null); }
+      if (next === "completed") {
+        setOrders(prev => prev.filter(o => o.id !== selected.id));
+        setSelected(null);
+      }
+    } finally { setSavingStatus(false); }
+  };
+
+  // Cash only — marks completed + paid in one action, sends single notification
+  const handleCompleteAndPay = async () => {
+    if (!selected) return;
+    setSavingStatus(true);
+    try {
+      await patchOrder(selected.id, {
+        status:         "completed",
+        payment_status: "paid",
+        amount_paid:    parseFloat(selected.amount_paid) || parseFloat(selected.total),
+      });
+      setOrders(prev => prev.filter(o => o.id !== selected.id));
+      setSelected(null);
     } finally { setSavingStatus(false); }
   };
 
@@ -881,7 +918,11 @@ export default function POS() {
     let list = filter === "all" ? orders : orders.filter(o => o.status === filter);
     if (search.trim()) {
       const q = search.toLowerCase();
-      list = list.filter(o => o.phone.toLowerCase().includes(q) || (o.order_text ?? "").toLowerCase().includes(q) || String(o.id).includes(q));
+      list = list.filter(o =>
+        o.phone.toLowerCase().includes(q) ||
+        (o.order_text ?? "").toLowerCase().includes(q) ||
+        String(o.id).includes(q)
+      );
     }
     return list;
   }, [orders, filter, search]);
@@ -992,6 +1033,7 @@ export default function POS() {
               saving={saving} savingStatus={savingStatus} marking={marking}
               onSave={handleSave} onCashFull={handleCashFull} onEcoPaid={handleEcoPaid}
               onAssign={handleAssign} onAdvance={handleAdvance}
+              onCompleteAndPay={handleCompleteAndPay}
             />
           ) : (
             <EmptyDetail orders={orders} c={c} />
